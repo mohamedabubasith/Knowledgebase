@@ -1,0 +1,68 @@
+[project]
+name = "cortex-kb"
+version = "1.0.0"
+description = "Self-hosted production-grade Knowledge Base"
+requires-python = ">=3.12"
+dependencies = [
+    # API
+    "fastapi==0.115.5",
+    "uvicorn[standard]==0.32.1",
+    "python-multipart==0.0.12",
+    "pydantic==2.9.2",
+    "pydantic-settings==2.6.1",
+    # Database
+    "asyncpg==0.30.0",
+    "sqlalchemy[asyncio]==2.0.36",
+    "greenlet==3.1.1",
+    # Object Storage
+    "minio==7.2.10",
+    "aiohttp==3.11.9",
+    # Vector DB
+    "qdrant-client==1.12.1",
+    "chromadb==0.5.23",
+    # PDF parsing
+    "PyMuPDF==1.24.14",
+    # Document parsing
+    "python-docx==1.1.2",
+    "beautifulsoup4==4.12.3",
+    "lxml==5.3.0",
+    # Chunking / tokenization
+    "tiktoken==0.8.0",
+    # Embeddings
+    "sentence-transformers==3.3.1",
+    "torch==2.5.1",
+    "numpy==1.26.4",
+    # HTTP client
+    "httpx==0.28.0",
+    # Auth
+    "python-jose[cryptography]==3.3.0",
+    "passlib[bcrypt]==1.7.4",
+    # Utils
+    "filetype==1.2.0",
+    "xxhash==3.5.0",
+    "tenacity==9.0.0",
+    "structlog==24.4.0",
+]
+
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[dependency-groups]
+dev = [
+    "pytest==8.3.4",
+    "pytest-asyncio==0.24.0",
+    "pytest-mock==3.14.0",
+    "anyio[trio]==4.7.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]

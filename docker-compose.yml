@@ -1,0 +1,95 @@
+version: "3.9"
+
+services:
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-admin}
+      POSTGRES_DB: ${POSTGRES_DB:-cortex_kb}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-admin} -d ${POSTGRES_DB:-cortex_kb}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  cortex-kb:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      # ── App ───────────────────────────────────────────────
+      APP_ENV: ${APP_ENV:-production}
+      APP_SECRET_KEY: ${APP_SECRET_KEY}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+
+      # ── Postgres (service name, not localhost) ─────────────
+      POSTGRES_DSN: postgresql://${POSTGRES_USER:-admin}:${POSTGRES_PASSWORD:-admin}@postgres:5432/${POSTGRES_DB:-cortex_kb}
+      POSTGRES_POOL_MIN: ${POSTGRES_POOL_MIN:-5}
+      POSTGRES_POOL_MAX: ${POSTGRES_POOL_MAX:-20}
+
+      # ── MinIO (service name, not localhost) ────────────────
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+      MINIO_BUCKET_RAW: ${MINIO_BUCKET_RAW:-raw-documents}
+      MINIO_SECURE: "false"
+
+      # ── External services (pass through from .env) ─────────
+      QDRANT_URL: ${QDRANT_URL}
+      QDRANT_API_KEY: ${QDRANT_API_KEY}
+      QDRANT_COLLECTION: ${QDRANT_COLLECTION:-cortex_kb}
+
+      UNSTRUCTURED_API_URL: ${UNSTRUCTURED_API_URL}
+      UNSTRUCTURED_API_KEY: ${UNSTRUCTURED_API_KEY}
+
+      OLLAMA_URL: ${OLLAMA_URL}
+      OLLAMA_EMBED_MODEL: ${OLLAMA_EMBED_MODEL:-paraphrase-multilingual:latest}
+      ST_MODEL: ${ST_MODEL:-all-MiniLM-L6-v2}
+
+      # ── ChromaDB fallback ──────────────────────────────────
+      CHROMA_PERSIST_DIR: /app/data/chroma
+
+      # ── Workers / Search ──────────────────────────────────
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-4}
+      PARSE_PROCESS_WORKERS: ${PARSE_PROCESS_WORKERS:-2}
+      EMBED_BATCH_SIZE: ${EMBED_BATCH_SIZE:-64}
+      INGEST_QUEUE_SIZE: ${INGEST_QUEUE_SIZE:-500}
+      SEARCH_TOP_K: ${SEARCH_TOP_K:-10}
+      HYBRID_VECTOR_WEIGHT: ${HYBRID_VECTOR_WEIGHT:-0.6}
+      HYBRID_LEXICAL_WEIGHT: ${HYBRID_LEXICAL_WEIGHT:-0.4}
+      SEARCH_CACHE_TTL: ${SEARCH_CACHE_TTL:-300}
+      SEARCH_CACHE_MAX: ${SEARCH_CACHE_MAX:-1000}
+
+    volumes:
+      - chroma_data:/app/data/chroma
+    ports:
+      - "8080:8080"
+
+volumes:
+  postgres_data:
+  minio_data:
+  chroma_data:
