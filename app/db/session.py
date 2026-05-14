@@ -32,6 +32,7 @@ def init_engine() -> None:
         max_overflow=settings.postgres_pool_max - settings.postgres_pool_min,
         pool_pre_ping=True,
         echo=False,
+        connect_args={"timeout": 30},  # 30s connect timeout for remote Postgres
     )
     AsyncSessionLocal = async_sessionmaker(
         _engine,
