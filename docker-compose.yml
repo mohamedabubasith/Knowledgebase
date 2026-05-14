@@ -8,8 +8,6 @@ services:
       - chroma_data:/app/data/chroma
     expose:
       - "8080"
-    labels:
-      - "traefik.http.services.cortex-kb.loadbalancer.server.port=8080"
     networks:
       - default
       - coolify
