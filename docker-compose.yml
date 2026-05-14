@@ -8,6 +8,14 @@ services:
       - chroma_data:/app/data/chroma
     expose:
       - "8080"
+    networks:
+      - default
+      - coolify
 
 volumes:
   chroma_data:
+
+networks:
+  default:
+  coolify:
+    external: true
