@@ -98,13 +98,35 @@ async def _probe_qdrant(embed_dim: int) -> bool:
         )
         collections = await client.get_collections()
         existing = [c.name for c in collections.collections]
-        if settings.qdrant_collection not in existing:
+
+        if settings.qdrant_collection in existing:
+            # Check dimension matches — recreate if mismatch
+            info = await client.get_collection(settings.qdrant_collection)
+            existing_dim = info.config.params.vectors.size  # type: ignore[union-attr]
+            if existing_dim != embed_dim:
+                log.warning(
+                    "qdrant_dim_mismatch_recreating",
+                    collection=settings.qdrant_collection,
+                    existing_dim=existing_dim,
+                    required_dim=embed_dim,
+                )
+                await client.delete_collection(settings.qdrant_collection)
+                await client.create_collection(
+                    collection_name=settings.qdrant_collection,
+                    vectors_config=VectorParams(size=embed_dim, distance=Distance.COSINE),
+                    on_disk_payload=True,
+                )
+                log.info("qdrant_collection_recreated", name=settings.qdrant_collection, dim=embed_dim)
+            else:
+                log.info("qdrant_collection_ok", name=settings.qdrant_collection, dim=existing_dim)
+        else:
             await client.create_collection(
                 collection_name=settings.qdrant_collection,
                 vectors_config=VectorParams(size=embed_dim, distance=Distance.COSINE),
                 on_disk_payload=True,
             )
-            log.info("qdrant_collection_created", name=settings.qdrant_collection)
+            log.info("qdrant_collection_created", name=settings.qdrant_collection, dim=embed_dim)
+
         await client.close()
         return True
     except Exception as e:
