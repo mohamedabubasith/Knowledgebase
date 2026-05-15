@@ -20,9 +20,13 @@ async def _process_index_job(job: dict) -> None:
 
         factory = get_session_factory()
         async with factory() as session:
+            # Force-update fts_vector for ALL chunks of this document.
+            # The DB trigger handles new inserts, but we explicitly update here
+            # to guarantee fts_vector is always populated (covers edge cases
+            # where trigger didn't fire, or chunks were inserted via bulk path).
             result = await session.execute(
                 update(Chunk)
-                .where(Chunk.document_id == document_id, Chunk.fts_vector.is_(None))
+                .where(Chunk.document_id == document_id, Chunk.tenant_id == tenant_id)
                 .values(fts_vector=func.to_tsvector("english", Chunk.chunk_text))
             )
             updated = result.rowcount or 0

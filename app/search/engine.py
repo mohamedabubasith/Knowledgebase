@@ -249,39 +249,73 @@ async def _keyword_search(
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+# Question/stop words stripped before FTS — they produce empty tsquery lexemes
+_QUESTION_WORDS = frozenset({
+    "what", "where", "when", "who", "which", "how", "why", "is", "are",
+    "was", "were", "does", "do", "did", "can", "could", "would", "should",
+    "the", "a", "an", "in", "on", "of", "for", "to", "and", "or", "not",
+    "it", "its", "that", "this", "these", "those", "there", "their",
+    "my", "your", "our", "by", "at", "with", "from", "has", "have", "had",
+    "been", "be", "will", "shall", "may", "might", "must", "need",
+})
+
+
+def _clean_fts_query(query: str) -> str:
+    """Strip question/stop words so FTS tsquery has meaningful lexemes."""
+    tokens = [w.strip("?!.,;:") for w in query.lower().split()]
+    meaningful = [t for t in tokens if t and t not in _QUESTION_WORDS and len(t) > 1]
+    # Fall back to original if we stripped everything
+    return " ".join(meaningful) if meaningful else query
+
+
 async def _run_fts(
     query: str,
     tenant_id: str,
     top_k: int,
     document_id: Optional[str],
 ):
-    fts_query = func.websearch_to_tsquery("english", query)
-    rank_expr = func.ts_rank_cd(Chunk.fts_vector, fts_query, 32).label("rank")
-
-    stmt = (
-        select(
-            Chunk.id,
-            Chunk.document_id,
-            Chunk.chunk_text,
-            Chunk.page_number,
-            Document.minio_path,
-            Document.filename,
-            rank_expr,
-        )
-        .join(Document, Document.id == Chunk.document_id)
-        .where(
-            Chunk.fts_vector.op("@@")(fts_query),
-            Chunk.tenant_id == tenant_id,
-        )
-        .order_by(rank_expr.desc())
-        .limit(top_k)
-    )
-    if document_id:
-        stmt = stmt.where(Chunk.document_id == document_id)
+    """FTS search with two-pass strategy:
+    1. websearch_to_tsquery on cleaned query (AND logic, high precision)
+    2. plainto_tsquery fallback if pass 1 returns 0 rows (more lenient)
+    """
+    cleaned = _clean_fts_query(query)
 
     factory = get_session_factory()
-    async with factory() as session:
-        return (await session.execute(stmt)).all()
+
+    async def _exec_fts(tsquery_fn) -> list:
+        fts_q = tsquery_fn("english", cleaned)
+        rank_expr = func.ts_rank_cd(Chunk.fts_vector, fts_q, 32).label("rank")
+        stmt = (
+            select(
+                Chunk.id,
+                Chunk.document_id,
+                Chunk.chunk_text,
+                Chunk.page_number,
+                Document.minio_path,
+                Document.filename,
+                rank_expr,
+            )
+            .join(Document, Document.id == Chunk.document_id)
+            .where(
+                Chunk.fts_vector.op("@@")(fts_q),
+                Chunk.tenant_id == tenant_id,
+            )
+            .order_by(rank_expr.desc())
+            .limit(top_k)
+        )
+        if document_id:
+            stmt = stmt.where(Chunk.document_id == document_id)
+        async with factory() as session:
+            return (await session.execute(stmt)).all()
+
+    # Pass 1 — websearch_to_tsquery (supports phrases, AND, OR, NOT)
+    rows = await _exec_fts(func.websearch_to_tsquery)
+
+    # Pass 2 — plainto_tsquery fallback (softer AND, no operators)
+    if not rows:
+        rows = await _exec_fts(func.plainto_tsquery)
+
+    return rows
 
 
 async def _fetch_chunks_by_ids(ids: list[str], tenant_id: str):
