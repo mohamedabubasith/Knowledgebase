@@ -64,18 +64,60 @@ def _chunk_with_pages(doc: ParsedDocument) -> list[Chunk]:
 
 
 def _build_char_offsets(text: str, token_ids: list[int]) -> list[tuple[int, int]]:
-    """Map each token index → (start_char, end_char) in original text."""
-    offsets = []
-    pos = 0
+    """Map each token index → (start_char, end_char) in original text.
+
+    tiktoken operates on UTF-8 bytes. We track byte positions then convert to
+    char positions via a one-time byte→char lookup table so multi-byte UTF-8
+    characters (CJK, Arabic, emoji, etc.) are handled correctly even when a
+    token straddles a character boundary.
+    """
+    text_bytes = text.encode("utf-8")
+    n_bytes = len(text_bytes)
+    n_chars = len(text)
+
+    # Build byte_pos → char_pos table (length n_bytes + 1, last entry = n_chars).
+    # Every byte that belongs to the same multi-byte sequence maps to the same
+    # char index; the sentinel at n_bytes maps to n_chars.
+    byte_to_char: list[int] = [0] * (n_bytes + 1)
+    char_idx = 0
+    b = 0
+    while b < n_bytes:
+        bval = text_bytes[b]
+        if bval < 0x80:
+            seq_len = 1
+        elif bval < 0xE0:
+            seq_len = 2
+        elif bval < 0xF0:
+            seq_len = 3
+        else:
+            seq_len = 4
+        for k in range(seq_len):
+            if b + k < n_bytes:
+                byte_to_char[b + k] = char_idx
+        b += seq_len
+        char_idx += 1
+    byte_to_char[n_bytes] = n_chars  # sentinel
+
+    offsets: list[tuple[int, int]] = []
+    byte_pos = 0
     for tid in token_ids:
         token_bytes = _TOKENIZER.decode_single_token_bytes(tid)
-        token_str = token_bytes.decode("utf-8", errors="replace")
-        start = text.find(token_str, pos)
-        if start == -1:
-            start = pos
-        end = start + len(token_str)
-        offsets.append((start, end))
-        pos = end
+        start_byte = byte_pos
+        end_byte = byte_pos + len(token_bytes)
+
+        start_char = byte_to_char[min(start_byte, n_bytes)]
+
+        # If end_byte lands inside a continuation byte sequence, advance to the
+        # next character boundary so the slice text[start_char:end_char] is
+        # always a valid substring (integrity check: len == end - start).
+        eb = min(end_byte, n_bytes)
+        while eb < n_bytes and 0x80 <= text_bytes[eb] < 0xC0:
+            eb += 1
+        end_char = byte_to_char[eb] if eb < n_bytes else n_chars
+
+        offsets.append((start_char, end_char))
+        byte_pos = end_byte  # advance by actual token byte length
+
     return offsets
 
 
