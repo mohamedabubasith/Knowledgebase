@@ -310,6 +310,137 @@ async def run_upload_flood(base_url: str, api_key: str, concurrency: int, total:
     return results
 
 
+async def run_large_upload_stress(base_url: str, api_key: str) -> Results:
+    """Upload progressively larger documents to stress Unstructured + worker memory."""
+    headers = {"X-Api-Key": api_key}
+    results = Results("large_upload")
+
+    # Generate docs: 10KB → 100KB → 500KB → 1MB → 5MB
+    sizes = [
+        ("10KB",   10_000),
+        ("100KB", 100_000),
+        ("500KB", 500_000),
+        ("1MB",  1_000_000),
+        ("5MB",  5_000_000),
+    ]
+
+    async with httpx.AsyncClient(base_url=base_url) as client:
+        for label, size in sizes:
+            uid = uuid.uuid4().hex
+            # Build realistic text content at the requested size
+            para = (
+                f"Load test document {uid}. "
+                "Machine learning models process data through layers of transformations. "
+                "Each neuron computes a weighted sum then applies a nonlinear activation. "
+                "Backpropagation adjusts weights to minimise the loss function. "
+            )
+            content = (para * (size // len(para) + 1))[:size]
+            doc_bytes = content.encode()
+            filename  = f"large_{label}_{uid[:8]}.txt"
+
+            print(f"  Uploading {label} ({len(doc_bytes):,} bytes) …", end="", flush=True)
+            t0 = time.monotonic()
+            try:
+                r = await client.post(
+                    "/ingest/upload",
+                    files={"file": (filename, doc_bytes, "text/plain")},
+                    headers=headers,
+                    timeout=60,
+                )
+                ms = (time.monotonic() - t0) * 1000
+                if r.status_code in (200, 202):
+                    doc_id = r.json().get("document_id")
+                    results.add(ms, r.status_code)
+                    print(f"\r  {c(GREEN, '✓')} {label:<6} upload accepted  {ms:.0f}ms  doc={doc_id}")
+                    # cleanup
+                    if doc_id:
+                        await client.delete(f"/documents/{doc_id}", headers=headers, timeout=10)
+                else:
+                    results.add(ms, r.status_code, f"HTTP {r.status_code}: {r.text[:100]}")
+                    print(f"\r  {c(RED, '✗')} {label:<6} HTTP {r.status_code}  {r.text[:80]}")
+            except Exception as e:
+                ms = (time.monotonic() - t0) * 1000
+                results.add(ms, 0, str(e)[:120])
+                print(f"\r  {c(RED, '✗')} {label:<6} {e}")
+
+            await asyncio.sleep(1)
+
+    return results
+
+
+async def run_upload_plus_search(base_url: str, api_key: str, duration_s: int = 60) -> dict[str, Results]:
+    """Simultaneous upload flood + search flood — closest to real crash scenario."""
+    headers  = {"X-Api-Key": api_key}
+    r_search = Results("search (during uploads)")
+    r_upload = Results("upload (concurrent)")
+    doc_ids: list[str] = []
+    lock = asyncio.Lock()
+    stop = asyncio.Event()
+
+    async def search_loop() -> None:
+        i = 0
+        while not stop.is_set():
+            await do_search(client, headers, r_search, SEARCH_QUERIES[i % len(SEARCH_QUERIES)])
+            i += 1
+
+    async def upload_loop() -> None:
+        while not stop.is_set():
+            doc_id = await do_upload(client, headers, r_upload)
+            if doc_id:
+                async with lock:
+                    doc_ids.append(doc_id)
+            await asyncio.sleep(2)   # pace uploads — 1 every 2s per worker
+
+    async with httpx.AsyncClient(base_url=base_url) as client:
+        tasks = (
+            [asyncio.create_task(search_loop()) for _ in range(10)] +   # 10 search workers
+            [asyncio.create_task(upload_loop()) for _ in range(3)]       # 3 upload workers
+        )
+        await asyncio.sleep(duration_s)
+        stop.set()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+        # cleanup
+        if doc_ids:
+            print(f"    cleaning up {len(doc_ids)} test docs …", end="", flush=True)
+            await asyncio.gather(*[
+                client.delete(f"/documents/{did}", headers=headers, timeout=10)
+                for did in doc_ids
+            ], return_exceptions=True)
+            print(f"\r    cleaned up {len(doc_ids)} test docs      ")
+
+    return {"search": r_search, "upload": r_upload}
+
+
+async def run_queue_saturation(base_url: str, api_key: str) -> Results:
+    """Blast 50 uploads simultaneously — saturate the ingest queue, check for drops/crashes."""
+    headers = {"X-Api-Key": api_key}
+    results = Results("queue_saturate c=50")
+    doc_ids: list[str] = []
+    lock = asyncio.Lock()
+
+    async def bounded_upload(sem: asyncio.Semaphore) -> None:
+        async with sem:
+            doc_id = await do_upload(client, headers, results)
+            if doc_id:
+                async with lock:
+                    doc_ids.append(doc_id)
+
+    sem = asyncio.Semaphore(50)
+    async with httpx.AsyncClient(base_url=base_url) as client:
+        await asyncio.gather(*[bounded_upload(sem) for _ in range(50)])
+
+        if doc_ids:
+            print(f"    cleaning up {len(doc_ids)} test docs …", end="", flush=True)
+            await asyncio.gather(*[
+                client.delete(f"/documents/{did}", headers=headers, timeout=10)
+                for did in doc_ids
+            ], return_exceptions=True)
+            print(f"\r    cleaned up {len(doc_ids)} test docs      ")
+
+    return results
+
+
 async def run_ramp_test(base_url: str, api_key: str) -> None:
     """Ramp concurrency 1→5→10→20→50→100 — find where error rate spikes."""
     print(f"\n{c(BOLD, '═══ RAMP TEST (search) ═══')}")
@@ -377,12 +508,16 @@ async def check_health(base_url: str, api_key: str) -> bool:
 # ── Main ───────────────────────────────────────────────────────────────────────
 async def main() -> None:
     ap = argparse.ArgumentParser(description="Cortex KB load test")
-    ap.add_argument("--base-url", default="https://knowledge.basivo.in", help="KB base URL")
-    ap.add_argument("--api-key",  required=True, help="X-Api-Key value")
-    ap.add_argument("--with-uploads", action="store_true", help="Include upload load test")
-    ap.add_argument("--ramp",    action="store_true", help="Ramp concurrency to find breaking point")
-    ap.add_argument("--spike",   type=int, default=0, metavar="N", help="Sustain N concurrent searches for --duration seconds")
-    ap.add_argument("--duration",type=int, default=30, help="Duration (s) for --spike test (default 30)")
+    ap.add_argument("--base-url",    default="https://knowledge.basivo.in", help="KB base URL")
+    ap.add_argument("--api-key",     required=True, help="X-Api-Key value")
+    ap.add_argument("--with-uploads",action="store_true", help="Include upload load test")
+    ap.add_argument("--ramp",        action="store_true", help="Ramp concurrency to find breaking point")
+    ap.add_argument("--spike",       type=int, default=0, metavar="N", help="Sustain N concurrent searches for --duration seconds")
+    ap.add_argument("--duration",    type=int, default=30, help="Duration (s) for --spike/--full test (default 30)")
+    ap.add_argument("--large-files", action="store_true", help="Upload 10KB→5MB files to stress memory")
+    ap.add_argument("--upload-search",action="store_true", help="Concurrent uploads + searches (real crash scenario)")
+    ap.add_argument("--queue-sat",   action="store_true", help="Blast 50 simultaneous uploads (queue saturation)")
+    ap.add_argument("--full",        action="store_true", help="Run every test suite end-to-end")
     args = ap.parse_args()
 
     base = args.base_url.rstrip("/")
@@ -392,12 +527,11 @@ async def main() -> None:
     if not ok:
         sys.exit(1)
 
-    # ── Ramp test ──────────────────────────────────────────────────────────────
+    # ── Individual flags ───────────────────────────────────────────────────────
     if args.ramp:
         await run_ramp_test(base, key)
         return
 
-    # ── Spike / sustained test ─────────────────────────────────────────────────
     if args.spike:
         print(f"\n{c(BOLD, f'═══ SPIKE TEST: {args.spike} concurrent users × {args.duration}s ═══')}")
         results = await run_mixed_load(base, key, concurrency=args.spike, duration_s=args.duration)
@@ -405,34 +539,52 @@ async def main() -> None:
             r.report()
         return
 
-    # ── Standard load test ─────────────────────────────────────────────────────
-    print(f"\n{c(BOLD, '═══ SEARCH LOAD TEST ═══')}")
+    if args.large_files:
+        print(f"\n{c(BOLD, '═══ LARGE FILE UPLOAD STRESS ═══')}")
+        r = await run_large_upload_stress(base, key)
+        r.report()
+        return
+
+    if args.upload_search:
+        dur = args.duration or 60
+        print(f"\n{c(BOLD, f'═══ UPLOAD + SEARCH SIMULTANEOUS ({dur}s) ═══')}")
+        print(f"  10 search workers + 3 upload workers running concurrently …")
+        res = await run_upload_plus_search(base, key, duration_s=dur)
+        for r in res.values():
+            r.report()
+        return
+
+    if args.queue_sat:
+        print(f"\n{c(BOLD, '═══ QUEUE SATURATION (50 simultaneous uploads) ═══')}")
+        r = await run_queue_saturation(base, key)
+        r.report()
+        return
+
+    # ── Full production readiness suite ───────────────────────────────────────
     all_results: list[Results] = []
 
-    for conc, total in [(1, 10), (5, 50), (10, 100), (20, 100), (50, 150)]:
-        print(f"  Running {total} searches @ concurrency={conc} …", end="", flush=True)
-        t0 = time.monotonic()
-        r = await run_concurrent_searches(base, key, conc, total)
-        elapsed = time.monotonic() - t0
-        print(f"\r", end="")
-        r.label = f"search c={conc:>3} n={total:>3}"
-        r.report()
-        all_results.append(r)
-        if sum(1 for s in r.status_codes if s >= 400 or s == 0) / len(r.status_codes) > 0.20:
-            print(f"\n  {c(RED, '⚠ >20% errors — stopping search ramp early')}")
-            break
-        await asyncio.sleep(1)
+    if args.full or not args.with_uploads:
+        print(f"\n{c(BOLD, '═══ 1/5  SEARCH RAMP ═══')}")
+        for conc, total in [(1, 10), (5, 50), (10, 100), (20, 100), (50, 150)]:
+            print(f"  Running {total} searches @ concurrency={conc} …", end="", flush=True)
+            r = await run_concurrent_searches(base, key, conc, total)
+            print(f"\r", end="")
+            r.label = f"search c={conc:>3} n={total:>3}"
+            r.report()
+            all_results.append(r)
+            if sum(1 for s in r.status_codes if s >= 400 or s == 0) / len(r.status_codes) > 0.20:
+                print(f"\n  {c(RED, '⚠ >20% errors — stopping search ramp early')}")
+                break
+            await asyncio.sleep(1)
 
-    # ── Mixed load ─────────────────────────────────────────────────────────────
-    print(f"\n{c(BOLD, '═══ MIXED LOAD (search + health + list) 30s ═══')}")
-    print(f"  10 concurrent search workers + 1 health poller + 1 list poller …")
-    mixed = await run_mixed_load(base, key, concurrency=10, duration_s=30)
-    for r in mixed.values():
-        r.report()
+        print(f"\n{c(BOLD, '═══ 2/5  MIXED LOAD 30s ═══')}")
+        print(f"  10 concurrent search workers + 1 health + 1 list …")
+        mixed = await run_mixed_load(base, key, concurrency=10, duration_s=30)
+        for r in mixed.values():
+            r.report()
 
-    # ── Upload flood (optional) ────────────────────────────────────────────────
-    if args.with_uploads:
-        print(f"\n{c(BOLD, '═══ UPLOAD FLOOD ═══')}")
+    if args.full or args.with_uploads:
+        print(f"\n{c(BOLD, '═══ 3/5  UPLOAD FLOOD ═══')}")
         for conc, total in [(1, 3), (3, 9), (5, 15)]:
             print(f"  Uploading {total} docs @ concurrency={conc} …", end="", flush=True)
             r = await run_upload_flood(base, key, conc, total)
@@ -444,6 +596,17 @@ async def main() -> None:
                 break
             await asyncio.sleep(2)
 
+    if args.full:
+        print(f"\n{c(BOLD, '═══ 4/5  LARGE FILE UPLOAD STRESS ═══')}")
+        r = await run_large_upload_stress(base, key)
+        r.report()
+
+        print(f"\n{c(BOLD, '═══ 5/5  UPLOAD + SEARCH SIMULTANEOUS (60s) ═══')}")
+        print(f"  10 search workers + 3 upload workers concurrently …")
+        res = await run_upload_plus_search(base, key, duration_s=60)
+        for r in res.values():
+            r.report()
+
     # ── Summary ────────────────────────────────────────────────────────────────
     print(f"\n{c(BOLD, '═══ SUMMARY ═══')}")
     total_errors = sum(
@@ -451,16 +614,15 @@ async def main() -> None:
         for r in all_results
     )
     total_reqs = sum(len(r.latencies) for r in all_results)
-    overall_rate = total_errors / total_reqs * 100 if total_reqs else 0
-
-    if overall_rate == 0:
-        print(f"  {c(GREEN, '✓ Zero errors across all search tests')}")
-    elif overall_rate < 5:
-        print(f"  {c(YELLOW, f'△ {overall_rate:.1f}% error rate — acceptable but investigate')}")
-    else:
-        print(f"  {c(RED, f'✗ {overall_rate:.1f}% error rate — server unstable under load')}")
-
-    print(f"  Total requests: {total_reqs}  errors: {total_errors}")
+    if total_reqs:
+        overall_rate = total_errors / total_reqs * 100
+        if overall_rate == 0:
+            print(f"  {c(GREEN, '✓ Zero errors across all tests')}")
+        elif overall_rate < 5:
+            print(f"  {c(YELLOW, f'△ {overall_rate:.1f}% error rate — acceptable but investigate')}")
+        else:
+            print(f"  {c(RED, f'✗ {overall_rate:.1f}% error rate — server unstable under load')}")
+        print(f"  Total requests: {total_reqs}  errors: {total_errors}")
     print()
 
 
