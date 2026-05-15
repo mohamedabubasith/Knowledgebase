@@ -59,6 +59,7 @@ async def search(
     tenant_id: str,
     mode: str = "hybrid",
     top_k: int = 10,
+    min_score: float = 0.0,
     document_id: Optional[str] = None,
 ) -> SearchResponse:
     t0 = time.monotonic()
@@ -79,11 +80,16 @@ async def search(
     else:
         results, used_mode = await _keyword_search(query, tenant_id, top_k, document_id)
 
+    # Apply min_score filter
+    if min_score > 0.0:
+        results = [r for r in results if r.score >= min_score]
+
     response = SearchResponse(
         results=results,
         total=len(results),
         search_mode_used=used_mode,
         query_ms=round((time.monotonic() - t0) * 1000, 2),
+        query=query,
     )
     await _cache_set(cache_key, response)
     return response
@@ -141,6 +147,7 @@ async def _hybrid_search(
             score=round(scores[cid], 6),
             page_number=c.page_number,
             file_path=c.minio_path,
+            filename=c.filename,
         ))
 
     return results, "hybrid"
@@ -170,6 +177,7 @@ async def _vector_search(
             score=round(score_map[cid], 6),
             page_number=chunk_map[cid].page_number,
             file_path=chunk_map[cid].minio_path,
+            filename=chunk_map[cid].filename,
         )
         for cid in ids if cid in chunk_map
     ]
@@ -194,6 +202,7 @@ async def _fts_search(
             score=round(float(r.rank), 6),
             page_number=r.page_number,
             file_path=r.minio_path,
+            filename=r.filename,
         )
         for r in rows
     ]
@@ -256,6 +265,7 @@ async def _run_fts(
             Chunk.chunk_text,
             Chunk.page_number,
             Document.minio_path,
+            Document.filename,
             rank_expr,
         )
         .join(Document, Document.id == Chunk.document_id)
@@ -279,7 +289,8 @@ async def _fetch_chunks_by_ids(ids: list[str], tenant_id: str):
         return []
     factory = get_session_factory()
     stmt = (
-        select(Chunk.id, Chunk.document_id, Chunk.chunk_text, Chunk.page_number, Document.minio_path)
+        select(Chunk.id, Chunk.document_id, Chunk.chunk_text, Chunk.page_number,
+               Document.minio_path, Document.filename)
         .join(Document, Document.id == Chunk.document_id)
         .where(Chunk.id.in_(ids), Chunk.tenant_id == tenant_id)
     )
