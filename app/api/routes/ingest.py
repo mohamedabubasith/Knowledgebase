@@ -20,13 +20,25 @@ log = structlog.get_logger(__name__)
 
 ALLOWED_MIME = {
     "application/pdf",
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",  # .docx
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",  # .pptx
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",  # .xlsx
     "application/msword",
+    "application/vnd.ms-powerpoint",
+    "application/vnd.ms-excel",
     "text/plain",
     "text/markdown",
     "text/x-markdown",
     "text/html",
     "application/xhtml+xml",
+}
+
+# .docx / .pptx / .xlsx are ZIP-based — filetype.guess() returns application/zip.
+# Map back to correct MIME by filename extension.
+_ZIP_EXTENSION_MIME = {
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 }
 
 MAX_FILE_SIZE = 100 * 1024 * 1024
@@ -42,12 +54,20 @@ async def upload_document(
     if len(data) > MAX_FILE_SIZE:
         raise HTTPException(status_code=413, detail="File exceeds 100MB limit")
 
-    kind = filetype.guess(data[:2048])
-    if kind is not None:
-        detected_mime = kind.mime
+    # Prefer content-type sent by client if specific (cortex-ai sets it from extension).
+    ct = (file.content_type or "").split(";")[0].strip().lower()
+    if ct and ct not in ("application/octet-stream", ""):
+        detected_mime = ct
     else:
-        ct = (file.content_type or "").split(";")[0].strip().lower()
-        detected_mime = ct if ct else "application/octet-stream"
+        kind = filetype.guess(data[:2048])
+        detected_mime = kind.mime if kind else "application/octet-stream"
+
+    # filetype.guess() returns application/zip for Office Open XML formats (.docx/.pptx/.xlsx).
+    # Remap using filename extension so they pass MIME validation.
+    if detected_mime == "application/zip":
+        import os as _os
+        ext = _os.path.splitext(file.filename or "")[1].lower()
+        detected_mime = _ZIP_EXTENSION_MIME.get(ext, detected_mime)
 
     if detected_mime not in ALLOWED_MIME:
         raise HTTPException(status_code=415, detail=f"Unsupported file type: {detected_mime}")
