@@ -61,7 +61,7 @@ async def _process_ingest_job(job: dict) -> None:
         if not chunks:
             await update_stage(document_id, tenant_id, "chunk", "failed",
                                {"error": "No chunks produced"})
-            await _set_doc_status(document_id, "parse_failed")
+            await _set_doc_status(document_id, "chunk_failed")
             return
 
         chunk_rows = [
