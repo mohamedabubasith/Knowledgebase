@@ -8,7 +8,7 @@ from app.api.deps import AuthContext, get_auth, require_editor
 from app.db.models import Chunk, Document
 from app.db.session import get_session_factory
 from app.models.schemas import ChunkOut, DocumentOut
-from app.workers.queue import purge_queue
+from app.workers.db_queue import enqueue
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 log = structlog.get_logger(__name__)
@@ -97,9 +97,14 @@ async def delete_document(
         )
         await session.commit()
 
-    await purge_queue.put({
-        "document_id": document_id,
-        "tenant_id": auth.tenant_id,
-        "minio_path": row.minio_path,
-    })
+    await enqueue(
+        stage="purge",
+        document_id=document_id,
+        tenant_id=auth.tenant_id,
+        payload={
+            "document_id": document_id,
+            "tenant_id": auth.tenant_id,
+            "minio_path": row.minio_path,
+        },
+    )
     return {"status": "deleting", "document_id": document_id}

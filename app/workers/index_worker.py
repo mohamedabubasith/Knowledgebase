@@ -1,3 +1,7 @@
+"""
+Index worker: force-update fts_vector for all chunks → mark document indexed.
+Uses PostgreSQL-backed job queue with retry + exponential backoff.
+"""
 import asyncio
 import structlog
 from sqlalchemy import update
@@ -6,14 +10,14 @@ from sqlalchemy.sql import func
 from app.core.pipeline import update_stage
 from app.db.models import Chunk, Document
 from app.db.session import get_session_factory
-from app.workers.queue import index_queue
+from app.workers.db_queue import ack, nack, wait_for_job
 
 log = structlog.get_logger(__name__)
 
 
-async def _process_index_job(job: dict) -> None:
-    document_id: str = job["document_id"]
-    tenant_id: str = job["tenant_id"]
+async def _process_index_job(job_id: str, payload: dict) -> None:
+    document_id: str = payload["document_id"]
+    tenant_id: str   = payload["tenant_id"]
 
     try:
         await update_stage(document_id, tenant_id, "index", "processing")
@@ -37,19 +41,20 @@ async def _process_index_job(job: dict) -> None:
 
         await update_stage(document_id, tenant_id, "index", "done", {"fts_updated": updated})
         log.info("index_done", document_id=document_id)
+        await ack(job_id)
 
     except Exception as e:
         log.exception("index_error", document_id=document_id)
         await update_stage(document_id, tenant_id, "index", "failed", {"error": str(e)})
+        await nack(job_id, str(e))
 
 
 async def run_index_worker() -> None:
     log.info("index_worker_started")
     while True:
         try:
-            job = await index_queue.get()
-            await _process_index_job(job)
-            index_queue.task_done()
+            job = await wait_for_job("index")
+            await _process_index_job(job.id, job.payload)
         except asyncio.CancelledError:
             break
         except Exception as e:

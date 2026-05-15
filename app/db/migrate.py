@@ -6,7 +6,7 @@ Only the Postgres-specific trigger DDL is raw (no ORM equivalent).
 import structlog
 from sqlalchemy import Index, text
 
-from app.db.models import Base, Chunk, Document
+from app.db.models import Base, Chunk, Document, PipelineJob
 from app.db.session import get_engine
 
 log = structlog.get_logger(__name__)
@@ -20,6 +20,12 @@ _EXTRA_INDEXES = [
     Index("idx_documents_checksum", Document.checksum),
     Index("idx_pstages_document", "pipeline_stages", "document_id"),
     Index("idx_audit_tenant_ts",  "audit_logs",      "tenant_id", "created_at"),
+    # Partial index for the hot path: workers scan only pending jobs
+    Index(
+        "idx_jobs_claimable",
+        PipelineJob.stage, PipelineJob.scheduled_at,
+        postgresql_where=PipelineJob.status == "pending",
+    ),
 ]
 
 

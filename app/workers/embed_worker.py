@@ -1,3 +1,8 @@
+"""
+Embed worker: load chunks → embed in batches → upsert to vector store.
+Uses PostgreSQL-backed job queue with retry + exponential backoff.
+Self-heals Qdrant dimension mismatch (deletes + recreates collection, retries once).
+"""
 import asyncio
 import structlog
 from sqlalchemy import select, update
@@ -8,7 +13,7 @@ from app.db.session import get_session_factory
 from app.embedding.embedder import embed_batch
 from app.vectorstore import get_vector_store
 from app.vectorstore.backend import VectorPoint
-from app.workers.queue import embed_queue, index_queue
+from app.workers.db_queue import ack, enqueue, nack, wait_for_job
 
 log = structlog.get_logger(__name__)
 
@@ -22,9 +27,9 @@ async def _set_doc_status(document_id: str, status: str) -> None:
         await session.commit()
 
 
-async def _process_embed_job(job: dict) -> None:
-    document_id: str = job["document_id"]
-    tenant_id: str = job["tenant_id"]
+async def _process_embed_job(job_id: str, payload: dict) -> None:
+    document_id: str = payload["document_id"]
+    tenant_id: str   = payload["tenant_id"]
 
     try:
         await update_stage(document_id, tenant_id, "embed", "processing")
@@ -41,9 +46,10 @@ async def _process_embed_job(job: dict) -> None:
         if not rows:
             await update_stage(document_id, tenant_id, "embed", "failed", {"error": "No chunks found"})
             await _set_doc_status(document_id, "embed_failed")
+            await ack(job_id)   # not retryable — chunks were deleted
             return
 
-        texts = [r.chunk_text for r in rows]
+        texts   = [r.chunk_text for r in rows]
         vectors = await embed_batch(texts)
 
         if len(vectors) != len(rows):
@@ -75,11 +81,11 @@ async def _process_embed_job(job: dict) -> None:
             err_str = str(upsert_err)
             if "Vector dimension error" in err_str or "expected dim" in err_str:
                 log.warning("embed_dim_mismatch_recreating_collection", error=err_str)
+                from app.core.config import settings
                 from app.core.registry import registry
+                from urllib.parse import urlparse, urlunparse
                 from qdrant_client import AsyncQdrantClient
                 from qdrant_client.models import Distance, VectorParams
-                from urllib.parse import urlparse, urlunparse
-                from app.core.config import settings
 
                 def _with_port(url: str) -> str:
                     p = urlparse(url)
@@ -107,7 +113,6 @@ async def _process_embed_job(job: dict) -> None:
                 raise
 
         async with factory() as session:
-            # Bulk update: set vector_id = id for all embedded chunks
             await session.execute(
                 update(Chunk),
                 [{"id": str(r.id), "vector_id": str(r.id)} for r in rows],
@@ -123,21 +128,23 @@ async def _process_embed_job(job: dict) -> None:
         })
 
         log.info("embed_done", document_id=document_id, count=len(points))
-        await index_queue.put({"document_id": document_id, "tenant_id": tenant_id})
+
+        await enqueue("index", document_id, tenant_id, {"document_id": document_id, "tenant_id": tenant_id})
+        await ack(job_id)
 
     except Exception as e:
         log.exception("embed_error", document_id=document_id)
         await update_stage(document_id, tenant_id, "embed", "failed", {"error": str(e)})
         await _set_doc_status(document_id, "embed_failed")
+        await nack(job_id, str(e))
 
 
 async def run_embed_worker() -> None:
     log.info("embed_worker_started")
     while True:
         try:
-            job = await embed_queue.get()
-            await _process_embed_job(job)
-            embed_queue.task_done()
+            job = await wait_for_job("embed")
+            await _process_embed_job(job.id, job.payload)
         except asyncio.CancelledError:
             break
         except Exception as e:

@@ -1,6 +1,7 @@
 """
 Purge worker: delete document from MinIO + vector store + Postgres.
 Order: vector store first (idempotent), then MinIO, then Postgres.
+Uses PostgreSQL-backed job queue with retry + exponential backoff.
 """
 import asyncio
 import structlog
@@ -10,15 +11,15 @@ from app.db.models import AuditLog, Document
 from app.db.session import get_session_factory
 from app.storage.minio_client import delete_file
 from app.vectorstore import get_vector_store
-from app.workers.queue import purge_queue
+from app.workers.db_queue import ack, nack, wait_for_job
 
 log = structlog.get_logger(__name__)
 
 
-async def _process_purge_job(job: dict) -> None:
-    document_id: str = job["document_id"]
-    tenant_id: str = job["tenant_id"]
-    minio_path: str = job["minio_path"]
+async def _process_purge_job(job_id: str, payload: dict) -> None:
+    document_id: str = payload["document_id"]
+    tenant_id: str   = payload["tenant_id"]
+    minio_path: str  = payload["minio_path"]
     factory = get_session_factory()
 
     try:
@@ -34,7 +35,7 @@ async def _process_purge_job(job: dict) -> None:
         except Exception as e:
             log.warning("purge_minio_fail", document_id=document_id, error=str(e))
 
-        # 3. Postgres (cascade deletes chunks + pipeline_stages)
+        # 3. Postgres (cascade deletes chunks + pipeline_stages + pipeline_jobs)
         async with factory() as session:
             await session.execute(
                 delete(Document).where(
@@ -51,23 +52,28 @@ async def _process_purge_job(job: dict) -> None:
             await session.commit()
 
         log.info("purge_done", document_id=document_id)
+        # Note: ack not called — job row was cascade-deleted with the document above.
+        # That's fine; the job is gone and won't be re-claimed.
 
     except Exception as e:
         log.exception("purge_error", document_id=document_id, error=str(e))
-        async with factory() as session:
-            await session.execute(
-                update(Document).where(Document.id == document_id).values(status="error")
-            )
-            await session.commit()
+        try:
+            async with factory() as session:
+                await session.execute(
+                    update(Document).where(Document.id == document_id).values(status="error")
+                )
+                await session.commit()
+        except Exception:
+            pass
+        await nack(job_id, str(e))
 
 
 async def run_purge_worker() -> None:
     log.info("purge_worker_started")
     while True:
         try:
-            job = await purge_queue.get()
-            await _process_purge_job(job)
-            purge_queue.task_done()
+            job = await wait_for_job("purge")
+            await _process_purge_job(job.id, job.payload)
         except asyncio.CancelledError:
             break
         except Exception as e:

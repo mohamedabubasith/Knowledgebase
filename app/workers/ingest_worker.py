@@ -1,6 +1,7 @@
 """
 Ingest worker: fetch file from MinIO → parse → chunk → persist → enqueue embed.
 Writes stage updates via pipeline tracker (Postgres + SSE broadcast).
+Uses PostgreSQL-backed job queue with retry + exponential backoff.
 """
 import asyncio
 import structlog
@@ -13,7 +14,7 @@ from app.db.session import get_session_factory
 from app.ingestion.chunker import chunk_document
 from app.parsers.router import parse_document
 from app.storage.minio_client import download_file
-from app.workers.queue import embed_queue, ingest_queue
+from app.workers.db_queue import ack, enqueue, nack, wait_for_job
 
 log = structlog.get_logger(__name__)
 
@@ -27,25 +28,26 @@ async def _set_doc_status(document_id: str, status: str) -> None:
         await session.commit()
 
 
-async def _process_ingest_job(job: dict) -> None:
-    document_id: str = job["document_id"]
-    tenant_id: str = job["tenant_id"]
-    filename: str = job["filename"]
-    mime_type: str = job["mime_type"]
-    minio_path: str = job["minio_path"]
+async def _process_ingest_job(job_id: str, payload: dict) -> None:
+    document_id: str = payload["document_id"]
+    tenant_id: str   = payload["tenant_id"]
+    filename: str    = payload["filename"]
+    mime_type: str   = payload["mime_type"]
+    minio_path: str  = payload["minio_path"]
 
     try:
         # ── Stage: parse ─────────────────────────────────────────────────────
         await update_stage(document_id, tenant_id, "parse", "processing")
         await _set_doc_status(document_id, "parsing")
 
-        data = await download_file(minio_path)
+        data   = await download_file(minio_path)
         parsed = await parse_document(filename, data, mime_type)
 
         if not parsed.raw_text.strip():
             await update_stage(document_id, tenant_id, "parse", "failed",
                                {"error": "Empty text after parsing", "parse_mode": parsed.parse_mode})
             await _set_doc_status(document_id, "parse_failed")
+            await ack(job_id)   # not retryable — empty doc
             return
 
         await update_stage(document_id, tenant_id, "parse", "done", {
@@ -62,6 +64,7 @@ async def _process_ingest_job(job: dict) -> None:
             await update_stage(document_id, tenant_id, "chunk", "failed",
                                {"error": "No chunks produced"})
             await _set_doc_status(document_id, "chunk_failed")
+            await ack(job_id)   # not retryable — document produced no content
             return
 
         chunk_rows = [
@@ -104,21 +107,24 @@ async def _process_ingest_job(job: dict) -> None:
         })
 
         log.info("ingest_done", document_id=document_id, chunks=len(chunks))
-        await embed_queue.put({"document_id": document_id, "tenant_id": tenant_id})
+
+        # Enqueue next stage then ack this job
+        await enqueue("embed", document_id, tenant_id, {"document_id": document_id, "tenant_id": tenant_id})
+        await ack(job_id)
 
     except Exception as e:
         log.exception("ingest_error", document_id=document_id)
         await update_stage(document_id, tenant_id, "parse", "failed", {"error": str(e)})
         await _set_doc_status(document_id, "error")
+        await nack(job_id, str(e))
 
 
 async def run_ingest_worker() -> None:
     log.info("ingest_worker_started")
     while True:
         try:
-            job = await ingest_queue.get()
-            await _process_ingest_job(job)
-            ingest_queue.task_done()
+            job = await wait_for_job("ingest")
+            await _process_ingest_job(job.id, job.payload)
         except asyncio.CancelledError:
             break
         except Exception as e:

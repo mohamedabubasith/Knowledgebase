@@ -71,9 +71,19 @@ def mock_pool(mock_conn):
 
 
 @pytest.fixture(autouse=True)
-def patch_pool(mock_pool):
-    with patch("app.db.pool._pool", mock_pool):
+def patch_pool(mock_pool, mock_sa_factory):
+    """
+    Two-layer DB mock:
+    1. Legacy asyncpg pool shim (create=True so it doesn't crash if absent).
+    2. SA session factory — patches AsyncSessionLocal so get_session_factory()
+       returns mock_sa_factory globally, covering deps + workers.
+    """
+    import app.db.session as _sess
+    original_asl = _sess.AsyncSessionLocal
+    _sess.AsyncSessionLocal = mock_sa_factory
+    with patch("app.db.pool._pool", mock_pool, create=True):
         yield mock_pool
+    _sess.AsyncSessionLocal = original_asl
 
 
 # ── Sample data ───────────────────────────────────────────────────────────────
@@ -128,3 +138,57 @@ def sample_document_row():
         "updated_at": datetime.now(timezone.utc),
         "checksum": "abc123",
     }
+
+
+# ── SQLAlchemy async session mocks ────────────────────────────────────────────
+
+@pytest.fixture
+def mock_sa_result():
+    """Generic SQLAlchemy execute result — call .scalar_one_or_none() or .scalars().all()."""
+    result = MagicMock()
+    result.scalars.return_value.all.return_value = []
+    result.scalar_one_or_none.return_value = None
+    result.rowcount = 0
+    return result
+
+
+@pytest.fixture
+def mock_sa_session(mock_sa_result):
+    """Mock SQLAlchemy AsyncSession."""
+    import uuid as _uuid_mod
+
+    session = AsyncMock()
+    session.execute = AsyncMock(return_value=mock_sa_result)
+    session.commit = AsyncMock()
+    session.flush = AsyncMock()
+    session.add = MagicMock()
+    session.expunge = MagicMock()
+
+    # refresh() simulates DB populating server-defaults (e.g. UUID primary key)
+    async def _refresh(obj):
+        if hasattr(obj, "id") and obj.id is None:
+            obj.id = str(_uuid_mod.uuid4())
+    session.refresh = AsyncMock(side_effect=_refresh)
+
+    # session.begin() — async context manager used by claim() for SELECT FOR UPDATE
+    begin_cm = AsyncMock()
+    begin_cm.__aenter__ = AsyncMock(return_value=None)
+    begin_cm.__aexit__ = AsyncMock(return_value=False)
+    session.begin = MagicMock(return_value=begin_cm)
+    return session
+
+
+@pytest.fixture
+def mock_sa_factory(mock_sa_session):
+    """
+    Mock for get_session_factory().
+    Calling mock_sa_factory() returns an async context manager that yields mock_sa_session.
+    """
+    cm = AsyncMock()
+    cm.__aenter__ = AsyncMock(return_value=mock_sa_session)
+    cm.__aexit__ = AsyncMock(return_value=False)
+    factory = MagicMock(return_value=cm)
+    return factory
+
+
+JOB_ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"

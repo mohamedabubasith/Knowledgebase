@@ -1,14 +1,8 @@
 """
-Asyncio queues for ingestion pipeline stages.
-All queues initialized at startup, workers launched as background tasks.
+Worker task registry — tracks asyncio tasks for clean shutdown.
+Job dispatching is now handled by the PostgreSQL-backed db_queue module.
 """
 import asyncio
-from app.core.config import settings
-
-ingest_queue: asyncio.Queue = asyncio.Queue(maxsize=settings.ingest_queue_size)
-embed_queue: asyncio.Queue = asyncio.Queue(maxsize=settings.ingest_queue_size)
-index_queue: asyncio.Queue = asyncio.Queue(maxsize=settings.ingest_queue_size)
-purge_queue: asyncio.Queue = asyncio.Queue(maxsize=settings.ingest_queue_size)
 
 _worker_tasks: list[asyncio.Task] = []
 

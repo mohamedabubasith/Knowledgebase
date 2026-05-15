@@ -13,7 +13,7 @@ from app.db.models import AuditLog, Document
 from app.db.session import get_session_factory
 from app.models.schemas import IngestResponse
 from app.storage.minio_client import upload_file
-from app.workers.queue import ingest_queue
+from app.workers.db_queue import enqueue
 
 router = APIRouter(prefix="/ingest", tags=["ingest"])
 log = structlog.get_logger(__name__)
@@ -89,10 +89,15 @@ async def upload_document(
         "filename": filename, "mime_type": detected_mime,
         "file_size": len(data), "minio_path": minio_path,
     })
-    await ingest_queue.put({
-        "document_id": document_id, "tenant_id": auth.tenant_id,
-        "filename": filename, "mime_type": detected_mime, "minio_path": minio_path,
-    })
+    await enqueue(
+        stage="ingest",
+        document_id=document_id,
+        tenant_id=auth.tenant_id,
+        payload={
+            "document_id": document_id, "tenant_id": auth.tenant_id,
+            "filename": filename, "mime_type": detected_mime, "minio_path": minio_path,
+        },
+    )
 
     log.info("upload_enqueued", document_id=document_id, size=len(data))
     return IngestResponse(document_id=document_id, status="pending", message="Ingestion queued")

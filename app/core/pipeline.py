@@ -12,6 +12,7 @@ from typing import Any, Optional
 import structlog
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 from sqlalchemy.sql import func
 
@@ -93,8 +94,15 @@ async def update_stage(
                 "detail": stmt.excluded.detail,
             },
         )
-        await session.execute(stmt)
-        await session.commit()
+        try:
+            await session.execute(stmt)
+            await session.commit()
+        except IntegrityError:
+            # Document was deleted while pipeline was still running — silently discard
+            await session.rollback()
+            log.info("update_stage_skipped_doc_deleted",
+                     document_id=document_id, stage=stage, status=status)
+            return
 
     event = {
         "document_id": document_id,

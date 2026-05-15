@@ -11,6 +11,14 @@ services:
     networks:
       - default
       - coolify
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 1024M
+        reservations:
+          cpus: "0.25"
+          memory: 512M
 
 volumes:
   chroma_data:

@@ -47,7 +47,15 @@ async def lifespan(app: FastAPI):
     # 6. Parser CPU process pool
     init_parser_pool(max_workers=settings.parse_process_workers)
 
-    # 7. Launch pipeline workers (N concurrent per stage)
+    # 7. Recover jobs that were 'processing' when the last instance died,
+    #    then purge old done/failed rows to prevent table bloat.
+    from app.workers.db_queue import cleanup_old_jobs, recover_stale_jobs
+    recovered = await recover_stale_jobs()
+    if recovered:
+        log.warning("startup_recovered_stale_jobs", count=recovered)
+    await cleanup_old_jobs()   # deletes done/failed rows older than 7 days
+
+    # 8. Launch pipeline workers (N concurrent per stage)
     from app.workers.ingest_worker import run_ingest_worker
     from app.workers.embed_worker import run_embed_worker
     from app.workers.index_worker import run_index_worker

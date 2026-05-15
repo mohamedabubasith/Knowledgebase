@@ -121,3 +121,25 @@ class AuditLog(Base):
     resource_id:   Mapped[Optional[str]] = mapped_column(UUID(as_uuid=False), nullable=True)
     metadata_:     Mapped[Optional[dict]] = mapped_column("metadata", JSONB, nullable=True)
     created_at:    Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class PipelineJob(Base):
+    """
+    Durable job queue backed by PostgreSQL.
+    Workers claim rows via SELECT FOR UPDATE SKIP LOCKED.
+    Failed jobs are retried with exponential backoff (max_attempts).
+    """
+    __tablename__ = "pipeline_jobs"
+
+    id:           Mapped[str]           = mapped_column(UUID(as_uuid=False), primary_key=True, default=_uuid)
+    document_id:  Mapped[str]           = mapped_column(UUID(as_uuid=False), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False)
+    tenant_id:    Mapped[str]           = mapped_column(UUID(as_uuid=False), nullable=False)
+    stage:        Mapped[str]           = mapped_column(String, nullable=False)   # ingest|embed|index|purge
+    status:       Mapped[str]           = mapped_column(String, nullable=False, default="pending")  # pending|processing|done|failed
+    payload:      Mapped[dict]          = mapped_column(JSONB, nullable=False, default=dict)
+    attempt:      Mapped[int]           = mapped_column(Integer, nullable=False, default=0)
+    max_attempts: Mapped[int]           = mapped_column(Integer, nullable=False, default=3)
+    last_error:   Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    scheduled_at: Mapped[datetime]      = mapped_column(DateTime(timezone=True), default=_now)
+    locked_at:    Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at:   Mapped[datetime]      = mapped_column(DateTime(timezone=True), default=_now)
