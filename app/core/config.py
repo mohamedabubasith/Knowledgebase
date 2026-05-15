@@ -38,7 +38,7 @@ class Settings(BaseSettings):
     # Embeddings
     ollama_url: str = "http://localhost:11434"
     ollama_embed_model: str = "nomic-embed-text"
-    st_model: str = "all-MiniLM-L6-v2"
+    st_model: str = "paraphrase-multilingual-mpnet-base-v2"  # 768-dim — matches Ollama paraphrase-multilingual
 
     # Workers
     worker_concurrency: int = 4
