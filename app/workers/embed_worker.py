@@ -68,7 +68,43 @@ async def _process_embed_job(job: dict) -> None:
             for i, r in enumerate(rows)
         ]
 
-        await get_vector_store().upsert_batch(points)
+        try:
+            await get_vector_store().upsert_batch(points)
+        except Exception as upsert_err:
+            # Qdrant dimension mismatch — recreate collection with correct dim and retry once
+            err_str = str(upsert_err)
+            if "Vector dimension error" in err_str or "expected dim" in err_str:
+                log.warning("embed_dim_mismatch_recreating_collection", error=err_str)
+                from app.core.registry import registry
+                from qdrant_client import AsyncQdrantClient
+                from qdrant_client.models import Distance, VectorParams
+                from urllib.parse import urlparse, urlunparse
+                from app.core.config import settings
+
+                def _with_port(url: str) -> str:
+                    p = urlparse(url)
+                    if not p.port:
+                        port = 443 if p.scheme == "https" else 80
+                        return urlunparse((p.scheme, f"{p.hostname}:{port}", p.path, p.params, p.query, p.fragment))
+                    return url
+
+                client = AsyncQdrantClient(
+                    url=_with_port(settings.qdrant_url),
+                    api_key=settings.qdrant_api_key or None,
+                    timeout=15.0,
+                    prefer_grpc=False,
+                )
+                await client.delete_collection(settings.qdrant_collection)
+                await client.create_collection(
+                    collection_name=settings.qdrant_collection,
+                    vectors_config=VectorParams(size=registry.embed_dimension, distance=Distance.COSINE),
+                    on_disk_payload=True,
+                )
+                await client.close()
+                log.info("collection_recreated_retrying", dim=registry.embed_dimension)
+                await get_vector_store().upsert_batch(points)
+            else:
+                raise
 
         async with factory() as session:
             # Bulk update: set vector_id = id for all embedded chunks
