@@ -262,10 +262,16 @@ _QUESTION_WORDS = frozenset({
 
 def _clean_fts_query(query: str) -> str:
     """Strip question/stop words so FTS tsquery has meaningful lexemes."""
-    tokens = [w.strip("?!.,;:") for w in query.lower().split()]
+    tokens = [w.strip("?!.,;:'\"") for w in query.lower().split()]
     meaningful = [t for t in tokens if t and t not in _QUESTION_WORDS and len(t) > 1]
-    # Fall back to original if we stripped everything
     return " ".join(meaningful) if meaningful else query
+
+
+def _or_fts_query(query: str) -> str:
+    """Build OR-joined websearch query — any term matches (high recall)."""
+    tokens = [w.strip("?!.,;:'\"") for w in query.lower().split()]
+    meaningful = [t for t in tokens if t and t not in _QUESTION_WORDS and len(t) > 1]
+    return " OR ".join(meaningful) if meaningful else query
 
 
 async def _run_fts(
@@ -274,16 +280,18 @@ async def _run_fts(
     top_k: int,
     document_id: Optional[str],
 ):
-    """FTS search with two-pass strategy:
-    1. websearch_to_tsquery on cleaned query (AND logic, high precision)
-    2. plainto_tsquery fallback if pass 1 returns 0 rows (more lenient)
+    """Three-pass FTS strategy (precision → recall):
+    1. websearch_to_tsquery on cleaned query — AND logic, high precision
+    2. plainto_tsquery on cleaned query    — AND logic, handles operators as literals
+    3. websearch_to_tsquery with OR terms  — OR logic, high recall for NL questions
     """
     cleaned = _clean_fts_query(query)
+    or_query = _or_fts_query(query)
 
     factory = get_session_factory()
 
-    async def _exec_fts(tsquery_fn) -> list:
-        fts_q = tsquery_fn("english", cleaned)
+    async def _exec_fts(q: str) -> list:
+        fts_q = func.websearch_to_tsquery("english", q)
         rank_expr = func.ts_rank_cd(Chunk.fts_vector, fts_q, 32).label("rank")
         stmt = (
             select(
@@ -308,12 +316,17 @@ async def _run_fts(
         async with factory() as session:
             return (await session.execute(stmt)).all()
 
-    # Pass 1 — websearch_to_tsquery (supports phrases, AND, OR, NOT)
-    rows = await _exec_fts(func.websearch_to_tsquery)
+    # Pass 1 — AND on cleaned query (strip question words, high precision)
+    rows = await _exec_fts(cleaned)
 
-    # Pass 2 — plainto_tsquery fallback (softer AND, no operators)
+    # Pass 2 — AND on original query (fallback if cleaning removed too much)
     if not rows:
-        rows = await _exec_fts(func.plainto_tsquery)
+        rows = await _exec_fts(query)
+
+    # Pass 3 — OR on cleaned tokens (high recall, catches partial matches)
+    # websearch_to_tsquery treats "word1 OR word2" as OR logic
+    if not rows:
+        rows = await _exec_fts(or_query)
 
     return rows
 
