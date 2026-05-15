@@ -2,7 +2,7 @@
 Token-based sliding window chunker.
 - tiktoken cl100k_base (deterministic, CPU-only)
 - Page-boundary aware: chunks never span pages when page data available
-- Min chunk: 64 tokens (noise filter)
+- Chunk size driven by EMBEDDING_MAX_TOKENS env var (default 96)
 - Integrity enforced: start_char + len(text) == end_char
 """
 import hashlib
@@ -10,14 +10,17 @@ from typing import Optional
 
 import tiktoken
 
+from app.core.config import settings
 from app.models.domain import Chunk, ParsedDocument
 
 _TOKENIZER = tiktoken.get_encoding("cl100k_base")
 
-CHUNK_SIZE = 512
-CHUNK_OVERLAP = 128       # 25%
-CHUNK_STRIDE = CHUNK_SIZE - CHUNK_OVERLAP
-MIN_CHUNK_TOKENS = 64
+# Chunk size is set to the embedding model's token limit (from env).
+# 25% overlap; min chunk = max(16, size // 6) to filter noise.
+CHUNK_SIZE    = settings.embedding_max_tokens
+CHUNK_OVERLAP = max(8, CHUNK_SIZE // 4)        # 25%
+CHUNK_STRIDE  = CHUNK_SIZE - CHUNK_OVERLAP
+MIN_CHUNK_TOKENS = max(16, CHUNK_SIZE // 6)
 
 
 class ChunkIntegrityError(Exception):
