@@ -248,7 +248,7 @@ def main() -> None:
             for mode in modes:
                 resp = client.post(
                     "/search",
-                    json={"query": question, "mode": mode, "top_k": 5},
+                    json={"query": question, "mode": mode, "top_k": 5, "document_id": doc_id},
                     headers=headers,
                 )
                 data = assert_status(resp, 200, f"Search {mode}")
