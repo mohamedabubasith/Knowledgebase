@@ -39,12 +39,12 @@ class Settings(BaseSettings):
     ollama_url: str = "http://localhost:11434"
     ollama_embed_model: str = "nomic-embed-text"
     st_model: str = "paraphrase-multilingual-mpnet-base-v2"  # 768-dim — matches Ollama paraphrase-multilingual
-    # Max tokens the embedding model accepts (WordPiece/SentencePiece tokens).
-    # paraphrase-multilingual-mpnet-base-v2 = 128
-    # nomic-embed-text                      = 8192
-    # mxbai-embed-large                     = 512
+    # Max tokens the embedding model accepts (model's native tokenizer tokens).
+    # paraphrase-multilingual:latest (GGUF bert) = 512 context_length → use 500 (leaves room for [CLS]/[SEP])
+    # nomic-embed-text                           = 8192
+    # mxbai-embed-large                          = 512
     # Set in .env as EMBEDDING_MAX_TOKENS to match whichever model you use.
-    embedding_max_tokens: int = 96  # conservative default: fits paraphrase-multilingual (128 WP limit)
+    embedding_max_tokens: int = 500  # default: paraphrase-multilingual (512 context − 12 special tokens)
 
     # Workers
     worker_concurrency: int = 4
