@@ -187,20 +187,25 @@ async def do_health(client: httpx.AsyncClient, results: Results) -> None:
 
 async def do_upload(client: httpx.AsyncClient, headers: dict, results: Results) -> Optional[str]:
     doc_name, doc_bytes, mime = SAMPLE_DOCS[int(time.monotonic() * 1000) % len(SAMPLE_DOCS)]
-    unique_name = f"load_{uuid.uuid4().hex[:8]}_{doc_name}"
+    # Append a UUID so every upload has a unique checksum — avoids 409 dedup rejection
+    unique_id = uuid.uuid4().hex
+    unique_bytes = doc_bytes + f"\n\n[load-test-id: {unique_id}]\n".encode()
+    unique_name = f"load_{unique_id[:8]}_{doc_name}"
     t0 = time.monotonic()
     try:
         r = await client.post(
             "/ingest/upload",
-            files={"file": (unique_name, doc_bytes, mime)},
+            files={"file": (unique_name, unique_bytes, mime)},
             headers=headers,
             timeout=30,
         )
         ms = (time.monotonic() - t0) * 1000
-        err = None if r.status_code in (200, 202) else f"HTTP {r.status_code}: {r.text[:100]}"
-        results.add(ms, r.status_code, err)
+        # 409 = duplicate (shouldn't happen with unique content, but not a server crash)
         if r.status_code in (200, 202):
+            results.add(ms, r.status_code)
             return r.json().get("document_id")
+        else:
+            results.add(ms, r.status_code, f"HTTP {r.status_code}: {r.text[:100]}")
     except Exception as e:
         ms = (time.monotonic() - t0) * 1000
         results.add(ms, 0, str(e)[:120])
@@ -275,21 +280,32 @@ async def run_mixed_load(base_url: str, api_key: str, concurrency: int, duration
     return {"search": r_search, "health": r_health, "list_docs": r_list}
 
 
-async def run_upload_flood(base_url: str, api_key: str, concurrency: int, total: int) -> Results:
-    """Upload `total` documents with `concurrency` parallel."""
+async def run_upload_flood(base_url: str, api_key: str, concurrency: int, total: int, cleanup: bool = True) -> Results:
+    """Upload `total` documents with `concurrency` parallel. Cleans up afterwards."""
     headers = {"X-Api-Key": api_key}
     results = Results(f"upload c={concurrency}")
     sem = asyncio.Semaphore(concurrency)
     doc_ids: list[str] = []
+    lock = asyncio.Lock()
 
     async def bounded_upload() -> None:
         async with sem:
             doc_id = await do_upload(client, headers, results)
             if doc_id:
-                doc_ids.append(doc_id)
+                async with lock:
+                    doc_ids.append(doc_id)
 
     async with httpx.AsyncClient(base_url=base_url) as client:
         await asyncio.gather(*[bounded_upload() for _ in range(total)])
+
+        if cleanup and doc_ids:
+            print(f"    cleaning up {len(doc_ids)} test docs …", end="", flush=True)
+            delete_tasks = [
+                client.delete(f"/documents/{did}", headers=headers, timeout=10)
+                for did in doc_ids
+            ]
+            await asyncio.gather(*delete_tasks, return_exceptions=True)
+            print(f"\r    cleaned up {len(doc_ids)} test docs      ")
 
     return results
 
