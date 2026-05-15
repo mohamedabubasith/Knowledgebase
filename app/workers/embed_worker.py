@@ -6,6 +6,7 @@ Self-heals Qdrant dimension mismatch (deletes + recreates collection, retries on
 import asyncio
 import structlog
 from sqlalchemy import select, update
+from sqlalchemy.orm.exc import StaleDataError
 
 from app.core.pipeline import update_stage
 from app.db.models import Chunk, Document
@@ -32,10 +33,24 @@ async def _process_embed_job(job_id: str, payload: dict) -> None:
     tenant_id: str   = payload["tenant_id"]
 
     try:
+        # Guard: doc may have been deleted before this job was picked up
+        factory = get_session_factory()
+        async with factory() as session:
+            doc_exists = (await session.execute(
+                select(Document.id).where(
+                    Document.id == document_id,
+                    Document.status != "deleted",
+                )
+            )).scalar_one_or_none()
+
+        if not doc_exists:
+            log.info("embed_skipped_doc_deleted", document_id=document_id)
+            await ack(job_id)
+            return
+
         await update_stage(document_id, tenant_id, "embed", "processing")
         await _set_doc_status(document_id, "embedding")
 
-        factory = get_session_factory()
         async with factory() as session:
             rows = (await session.execute(
                 select(Chunk)
@@ -112,15 +127,22 @@ async def _process_embed_job(job_id: str, payload: dict) -> None:
             else:
                 raise
 
-        async with factory() as session:
-            await session.execute(
-                update(Chunk),
-                [{"id": str(r.id), "vector_id": str(r.id)} for r in rows],
-            )
-            await session.execute(
-                update(Document).where(Document.id == document_id).values(status="embedded")
-            )
-            await session.commit()
+        try:
+            async with factory() as session:
+                await session.execute(
+                    update(Chunk),
+                    [{"id": str(r.id), "vector_id": str(r.id)} for r in rows],
+                )
+                await session.execute(
+                    update(Document).where(Document.id == document_id).values(status="embedded")
+                )
+                await session.commit()
+        except StaleDataError:
+            # Doc/chunks deleted between embed and DB write — vectors already in Qdrant
+            # (will be orphaned until next cleanup sweep). Just ack and move on.
+            log.info("embed_stale_doc_deleted_mid_flight", document_id=document_id)
+            await ack(job_id)
+            return
 
         await update_stage(document_id, tenant_id, "embed", "done", {
             "vector_count": len(points),
