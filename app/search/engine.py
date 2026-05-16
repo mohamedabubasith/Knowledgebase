@@ -18,6 +18,7 @@ from app.db.session import get_session_factory
 from app.embedding.embedder import embed_single
 from app.models.schemas import SearchResponse, SearchResultItem
 from app.vectorstore import get_vector_store
+from app.search.tabular_engine import query_tabular
 
 log = structlog.get_logger(__name__)
 
@@ -84,6 +85,9 @@ async def search(
     if min_score > 0.0:
         results = [r for r in results if r.score >= min_score]
 
+    # Enrich tabular results with DuckDB NL2SQL answers
+    results = await _enrich_tabular_results(query, results)
+
     response = SearchResponse(
         results=results,
         total=len(results),
@@ -140,6 +144,7 @@ async def _hybrid_search(
         c = chunk_map.get(cid)
         if not c:
             continue
+        is_tab = getattr(c, "is_tabular", False) or False
         results.append(SearchResultItem(
             chunk_id=cid,
             document_id=str(c.document_id),
@@ -148,6 +153,8 @@ async def _hybrid_search(
             page_number=c.page_number,
             file_path=c.minio_path,
             filename=c.filename,
+            result_type="tabular" if is_tab else "text",
+            table_schema=c.table_schema if is_tab else None,
         ))
 
     return results, "hybrid"
@@ -169,18 +176,23 @@ async def _vector_search(
     chunks = await _fetch_chunks_by_ids(ids, tenant_id)
     chunk_map = {str(c.id): c for c in chunks}
 
-    results = [
-        SearchResultItem(
+    results = []
+    for cid in ids:
+        c = chunk_map.get(cid)
+        if not c:
+            continue
+        is_tab = getattr(c, "is_tabular", False) or False
+        results.append(SearchResultItem(
             chunk_id=cid,
-            document_id=str(chunk_map[cid].document_id),
-            text=chunk_map[cid].chunk_text,
+            document_id=str(c.document_id),
+            text=c.chunk_text,
             score=round(score_map[cid], 6),
-            page_number=chunk_map[cid].page_number,
-            file_path=chunk_map[cid].minio_path,
-            filename=chunk_map[cid].filename,
-        )
-        for cid in ids if cid in chunk_map
-    ]
+            page_number=c.page_number,
+            file_path=c.minio_path,
+            filename=c.filename,
+            result_type="tabular" if is_tab else "text",
+            table_schema=c.table_schema if is_tab else None,
+        ))
     return results, "vector_only"
 
 
@@ -194,8 +206,10 @@ async def _fts_search(
 ) -> tuple[list[SearchResultItem], str]:
     rows = await _run_fts(query, tenant_id, top_k, document_id)
 
-    results = [
-        SearchResultItem(
+    results = []
+    for r in rows:
+        is_tab = getattr(r, "is_tabular", False) or False
+        results.append(SearchResultItem(
             chunk_id=str(r.id),
             document_id=str(r.document_id),
             text=r.chunk_text,
@@ -203,9 +217,9 @@ async def _fts_search(
             page_number=r.page_number,
             file_path=r.minio_path,
             filename=r.filename,
-        )
-        for r in rows
-    ]
+            result_type="tabular" if is_tab else "text",
+            table_schema=r.table_schema if is_tab else None,
+        ))
     return results, "lexical_only"
 
 
@@ -219,7 +233,11 @@ async def _keyword_search(
 ) -> tuple[list[SearchResultItem], str]:
     factory = get_session_factory()
     stmt = (
-        select(Chunk.id, Chunk.document_id, Chunk.chunk_text, Chunk.page_number, Document.minio_path)
+        select(
+            Chunk.id, Chunk.document_id, Chunk.chunk_text, Chunk.page_number,
+            Document.minio_path, Document.filename,
+            Document.is_tabular, Document.table_schema,
+        )
         .join(Document, Document.id == Chunk.document_id)
         .where(
             Chunk.chunk_text.ilike(f"%{query}%"),
@@ -233,17 +251,20 @@ async def _keyword_search(
     async with factory() as session:
         rows = (await session.execute(stmt)).all()
 
-    results = [
-        SearchResultItem(
+    results = []
+    for r in rows:
+        is_tab = getattr(r, "is_tabular", False) or False
+        results.append(SearchResultItem(
             chunk_id=str(r.id),
             document_id=str(r.document_id),
             text=r.chunk_text,
             score=0.0,
             page_number=r.page_number,
             file_path=r.minio_path,
-        )
-        for r in rows
-    ]
+            filename=r.filename,
+            result_type="tabular" if is_tab else "text",
+            table_schema=r.table_schema if is_tab else None,
+        ))
     return results, "keyword_fallback"
 
 
@@ -301,6 +322,8 @@ async def _run_fts(
                 Chunk.page_number,
                 Document.minio_path,
                 Document.filename,
+                Document.is_tabular,
+                Document.table_schema,
                 rank_expr,
             )
             .join(Document, Document.id == Chunk.document_id)
@@ -336,10 +359,61 @@ async def _fetch_chunks_by_ids(ids: list[str], tenant_id: str):
         return []
     factory = get_session_factory()
     stmt = (
-        select(Chunk.id, Chunk.document_id, Chunk.chunk_text, Chunk.page_number,
-               Document.minio_path, Document.filename)
+        select(
+            Chunk.id,
+            Chunk.document_id,
+            Chunk.chunk_text,
+            Chunk.page_number,
+            Document.minio_path,
+            Document.filename,
+            Document.is_tabular,
+            Document.table_schema,
+        )
         .join(Document, Document.id == Chunk.document_id)
         .where(Chunk.id.in_(ids), Chunk.tenant_id == tenant_id)
     )
     async with factory() as session:
         return (await session.execute(stmt)).all()
+
+
+# ── Tabular result enrichment ─────────────────────────────────────────────────
+
+async def _enrich_tabular_results(
+    query: str,
+    results: list[SearchResultItem],
+) -> list[SearchResultItem]:
+    """
+    For each result that came from a tabular document, run NL2SQL via DuckDB
+    and replace the generic summary chunk text with the actual query answer.
+
+    Non-tabular results are returned unchanged.
+    Errors are logged and the original summary text is kept as fallback.
+    """
+    tabular_indices = [
+        i for i, r in enumerate(results)
+        if r.table_schema is not None
+    ]
+    if not tabular_indices:
+        return results
+
+    async def _enrich_one(idx: int) -> None:
+        r = results[idx]
+        try:
+            sql, md = await query_tabular(
+                query=query,
+                document_id=r.document_id,
+                minio_path=r.file_path,
+                table_schema=r.table_schema,
+                filename=r.filename or "",
+            )
+            results[idx] = r.model_copy(update={
+                "text":        md,
+                "result_type": "tabular",
+                "sql_query":   sql,
+            })
+        except Exception as exc:
+            log.error("tabular_enrichment_error", document_id=r.document_id, error=str(exc))
+            # Keep original summary text — still useful context
+
+    await asyncio.gather(*[_enrich_one(i) for i in tabular_indices])
+    return results

@@ -40,6 +40,14 @@ async def run_migrations() -> None:
         # Create all ORM-defined tables (IF NOT EXISTS behaviour built-in)
         await conn.run_sync(Base.metadata.create_all)
 
+        # Incremental column additions — safe on existing deployments
+        await conn.execute(text(
+            "ALTER TABLE documents ADD COLUMN IF NOT EXISTS is_tabular BOOLEAN NOT NULL DEFAULT false"
+        ))
+        await conn.execute(text(
+            "ALTER TABLE documents ADD COLUMN IF NOT EXISTS table_schema JSONB"
+        ))
+
         # FTS auto-update trigger on chunks.chunk_text
         await conn.execute(text("""
             CREATE OR REPLACE FUNCTION set_updated_at()

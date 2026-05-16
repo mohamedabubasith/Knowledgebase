@@ -59,6 +59,13 @@ class Settings(BaseSettings):
     search_cache_ttl: int = 300
     search_cache_max: int = 1000
 
+    # Tabular NL2SQL
+    # Model used to generate SQL from natural language. Must be available in Ollama.
+    # Recommended: qwen2.5:7b (fast + good SQL), or any instruct model.
+    tabular_sql_model: str = "qwen2.5:7b"
+    # Max rows DuckDB will return for a single tabular query
+    tabular_max_result_rows: int = 100
+
     # JWT
     jwt_algorithm: str = "HS256"
     jwt_expire_minutes: int = 60

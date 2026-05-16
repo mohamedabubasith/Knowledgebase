@@ -69,6 +69,12 @@ class SearchResultItem(BaseModel):
     page_number: Optional[int]
     file_path: str
     filename: Optional[str] = None
+    # Tabular-enriched results
+    result_type: str = "text"          # "text" | "tabular"
+    sql_query: Optional[str] = None    # DuckDB SQL that produced the result (tabular only)
+    # Internal — populated by search engine for tabular enrichment.
+    # Not excluded so model_copy() propagates it; clients can ignore it.
+    table_schema: Optional[dict] = Field(default=None, description="Schema metadata for tabular docs")
 
 
 class SearchResponse(BaseModel):
