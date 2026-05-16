@@ -21,8 +21,7 @@ async def parse(filename: str, data: bytes, mime_type: str) -> ParsedDocument:
             headers=headers,
             files={"files": (filename, data, mime_type)},
             data={
-                "strategy": "hi_res",
-                "coordinates": "true",
+                "strategy": "fast",
                 "include_page_breaks": "true",
             },
         )
