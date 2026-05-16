@@ -31,8 +31,18 @@ import os
 import sys
 import time
 import textwrap
+from pathlib import Path
 
 import httpx
+
+# Load .env from repo root so TABULAR_SQL_* vars are available
+_env_path = Path(__file__).resolve().parent.parent / ".env"
+if _env_path.exists():
+    for _line in _env_path.read_text().splitlines():
+        _line = _line.strip()
+        if _line and not _line.startswith("#") and "=" in _line:
+            _k, _, _v = _line.partition("=")
+            os.environ.setdefault(_k.strip(), _v.strip())
 
 # ── Colour helpers ────────────────────────────────────────────────────────────
 
