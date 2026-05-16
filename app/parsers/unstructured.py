@@ -15,7 +15,7 @@ log = structlog.get_logger(__name__)
 async def parse(filename: str, data: bytes, mime_type: str) -> ParsedDocument:
     headers = {"unstructured-api-key": settings.unstructured_api_key} if settings.unstructured_api_key else {}
 
-    async with httpx.AsyncClient(timeout=120.0) as client:
+    async with httpx.AsyncClient(timeout=600.0) as client:
         r = await client.post(
             f"{settings.unstructured_api_url}/general/v0/general",
             headers=headers,
