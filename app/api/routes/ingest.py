@@ -5,7 +5,7 @@ from typing import Annotated, Optional
 import filetype
 import structlog
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from app.api.deps import AuthContext, require_editor
 from app.core.pipeline import update_stage
@@ -123,9 +123,8 @@ async def upload_document(
             log.info("upload_duplicate_failed_reprocessing", document_id=doc_id)
             existing_doc.status = "pending"
             async with factory() as session:
-                from sqlalchemy import update as _update
                 await session.execute(
-                    _update(Document).where(Document.id == doc_id).values(status="pending")
+                    update(Document).where(Document.id == doc_id).values(status="pending")
                 )
                 await session.commit()
 
@@ -157,6 +156,36 @@ async def upload_document(
             status=existing_doc.status,
             message="Document is already being processed",
         )
+
+    # ── Same filename, different content → replace old document ──────────────
+    async with factory() as session:
+        old_doc = (await session.execute(
+            select(Document).where(
+                Document.filename == filename,
+                Document.tenant_id == auth.tenant_id,
+                Document.status != "deleted",
+                Document.status != "deleting",
+            )
+        )).scalar_one_or_none()
+
+    if old_doc and old_doc.checksum != checksum:
+        # Mark old doc for deletion and purge asynchronously.
+        async with factory() as session:
+            await session.execute(
+                update(Document).where(Document.id == old_doc.id).values(status="deleting")
+            )
+            await session.commit()
+        await enqueue(
+            stage="purge",
+            document_id=old_doc.id,
+            tenant_id=auth.tenant_id,
+            payload={
+                "document_id": old_doc.id,
+                "tenant_id": auth.tenant_id,
+                "minio_path": old_doc.minio_path,
+            },
+        )
+        log.info("upload_replacing_old_doc", old_doc_id=old_doc.id, filename=filename)
 
     # ── New document ──────────────────────────────────────────────────────────
     document_id = str(uuid.uuid4())
