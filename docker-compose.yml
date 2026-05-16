@@ -3,6 +3,7 @@ version: "3.9"
 services:
   cortex-kb:
     build: .
+    container_name: cortex-kb
     restart: unless-stopped
     volumes:
       - chroma_data:/app/data/chroma
