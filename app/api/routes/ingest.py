@@ -138,3 +138,55 @@ async def upload_document(
 
     log.info("upload_enqueued", document_id=document_id, size=len(data))
     return IngestResponse(document_id=document_id, status="pending", message="Ingestion queued")
+
+
+@router.post("/reprocess/{document_id}", response_model=IngestResponse, status_code=status.HTTP_202_ACCEPTED)
+async def reprocess_document(
+    document_id: str,
+    auth: Annotated[AuthContext, Depends(require_editor)],
+    parsing_strategy: Annotated[Optional[str], Form()] = "fast",
+) -> IngestResponse:
+    """
+    Re-enqueue a failed (or stuck) document for ingestion.
+
+    Resets pipeline stages and re-runs the full ingest → embed → index flow.
+    Useful after transient errors (timeouts, OOM, connectivity issues).
+    """
+    factory = get_session_factory()
+    async with factory() as session:
+        doc = (await session.execute(
+            select(Document).where(
+                Document.id == document_id,
+                Document.tenant_id == auth.tenant_id,
+                Document.status != "deleted",
+            )
+        )).scalar_one_or_none()
+
+        if not doc:
+            raise HTTPException(status_code=404, detail="Document not found")
+
+        # Reset to pending so pipeline can re-run
+        doc.status = "pending"
+        await session.commit()
+
+    strategy = parsing_strategy if parsing_strategy in ("fast", "hi_res", "ocr_only", "auto") else "fast"
+
+    # Reset all pipeline stages
+    await update_stage(document_id, auth.tenant_id, "parse", "pending")
+    await update_stage(document_id, auth.tenant_id, "chunk", "pending")
+    await update_stage(document_id, auth.tenant_id, "embed", "pending")
+    await update_stage(document_id, auth.tenant_id, "index", "pending")
+
+    await enqueue(
+        stage="ingest",
+        document_id=document_id,
+        tenant_id=auth.tenant_id,
+        payload={
+            "document_id": document_id, "tenant_id": auth.tenant_id,
+            "filename": doc.filename, "mime_type": doc.mime_type, "minio_path": doc.minio_path,
+            "parsing_strategy": strategy,
+        },
+    )
+
+    log.info("reprocess_enqueued", document_id=document_id, strategy=strategy)
+    return IngestResponse(document_id=document_id, status="pending", message="Reprocessing queued")
