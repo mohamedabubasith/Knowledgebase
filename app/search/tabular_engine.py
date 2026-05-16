@@ -55,24 +55,47 @@ def _validate_sql(sql: str) -> None:
 # SQL generation via Ollama
 # ---------------------------------------------------------------------------
 
+def _sql_base_url() -> str:
+    """
+    Resolve the OpenAI-compatible base URL for SQL generation.
+
+    Priority:
+      1. TABULAR_SQL_BASE_URL if explicitly set
+      2. OLLAMA_URL + /v1  (Ollama exposes OpenAI-compat at /v1)
+    """
+    if settings.tabular_sql_base_url.strip():
+        return settings.tabular_sql_base_url.rstrip("/")
+    return settings.ollama_url.rstrip("/") + "/v1"
+
+
 async def _generate_sql(query: str, schema: dict, filename: str) -> str:
     """
-    Call Ollama to translate `query` into a DuckDB SQL SELECT against `data`.
+    Call an OpenAI-compatible /chat/completions endpoint to translate `query`
+    into a DuckDB SQL SELECT against the `data` table.
 
-    Returns the raw SQL string (cleaned of markdown fences).
+    Works with: OpenAI, Groq, together.ai, vLLM, LiteLLM, Ollama (/v1), etc.
+    Returns the cleaned SQL string (no markdown fences, no trailing semicolons).
     """
-    cols = schema.get("columns", [])
+    cols      = schema.get("columns", [])
     row_count = schema.get("row_count", 0)
 
     col_lines = []
     for c in cols:
-        samples = c.get("sample", [])
-        sample_note = f" — e.g. {', '.join(repr(s) for s in samples[:2])}" if samples else ""
+        samples     = c.get("sample", [])
+        sample_note = (
+            f" — e.g. {', '.join(repr(s) for s in samples[:2])}"
+            if samples else ""
+        )
         col_lines.append(f"  {c['name']}  {c['type']}{sample_note}")
     cols_block = "\n".join(col_lines)
 
-    prompt = (
-        f"You are a DuckDB SQL expert. Write a single SQL SELECT query to answer the question below.\n\n"
+    system_msg = (
+        "You are a DuckDB SQL expert. "
+        "You write precise, read-only SQL SELECT queries. "
+        "Return ONLY the SQL statement — no explanation, no markdown fences, "
+        "no trailing semicolons."
+    )
+    user_msg = (
         f"Table name : `data`\n"
         f"Source file: {filename}\n"
         f"Total rows : {row_count:,}\n"
@@ -80,41 +103,57 @@ async def _generate_sql(query: str, schema: dict, filename: str) -> str:
         f"Rules:\n"
         f"- Only SELECT or WITH … SELECT queries (no writes, no DDL)\n"
         f"- Table name is always `data`\n"
-        f"- LIMIT to {settings.tabular_max_result_rows} rows unless the question specifically "
-        f"asks for all rows or a different limit\n"
-        f"- Use DuckDB syntax (strftime, epoch, COLUMNS, etc. are available)\n"
-        f"- Return ONLY the SQL — no explanation, no markdown fences, no trailing semicolons\n\n"
+        f"- LIMIT to {settings.tabular_max_result_rows} rows unless the question explicitly "
+        f"requests a different limit\n"
+        f"- Use DuckDB SQL syntax (strftime, epoch, COLUMNS, EXCLUDE, etc.)\n"
+        f"- Cast or coerce types as needed (TRY_CAST is available)\n\n"
         f"Question: {query}\n\n"
         f"SQL:"
     )
 
+    base_url = _sql_base_url()
+    api_key  = settings.tabular_sql_api_key or "ollama"
+    model    = settings.tabular_sql_model
+
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=45.0) as client:
             resp = await client.post(
-                f"{settings.ollama_url}/api/generate",
+                f"{base_url}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
                 json={
-                    "model":   settings.tabular_sql_model,
-                    "prompt":  prompt,
-                    "stream":  False,
-                    "options": {"temperature": 0.05, "num_predict": 512},
+                    "model":    model,
+                    "messages": [
+                        {"role": "system", "content": system_msg},
+                        {"role": "user",   "content": user_msg},
+                    ],
+                    "temperature": 0.05,
+                    "max_tokens":  512,
+                    "stream":      False,
                 },
             )
             resp.raise_for_status()
-            raw_sql: str = resp.json().get("response", "").strip()
+            data    = resp.json()
+            raw_sql = data["choices"][0]["message"]["content"].strip()
     except httpx.HTTPStatusError as exc:
         raise RuntimeError(
-            f"Ollama returned HTTP {exc.response.status_code} for SQL generation"
+            f"SQL provider returned HTTP {exc.response.status_code} — check "
+            f"TABULAR_SQL_BASE_URL / TABULAR_SQL_API_KEY / TABULAR_SQL_MODEL"
         ) from exc
+    except (KeyError, IndexError) as exc:
+        raise RuntimeError(f"Unexpected response structure from SQL provider: {exc}") from exc
     except Exception as exc:
         raise RuntimeError(f"SQL generation call failed: {exc}") from exc
 
-    # Strip markdown fences if model disobeys the instruction
+    # Strip markdown fences if model disobeys
     raw_sql = re.sub(r"```sql\s*", "", raw_sql, flags=re.IGNORECASE)
     raw_sql = re.sub(r"```\s*",    "", raw_sql)
     raw_sql = raw_sql.strip().rstrip(";").strip()
 
     if not raw_sql:
-        raise ValueError("LLM returned an empty SQL response")
+        raise ValueError("SQL provider returned an empty response")
 
     return raw_sql
 
