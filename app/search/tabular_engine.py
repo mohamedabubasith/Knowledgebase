@@ -34,10 +34,14 @@ log = structlog.get_logger(__name__)
 # ---------------------------------------------------------------------------
 
 _WRITE_OPS = re.compile(
-    r"\b(DROP|DELETE|INSERT|UPDATE|CREATE|ALTER|TRUNCATE|REPLACE|GRANT|REVOKE"
+    r"\b(DROP|DELETE|INSERT|UPDATE|CREATE|ALTER|TRUNCATE|GRANT|REVOKE"
     r"|ATTACH|DETACH|COPY|EXPORT|IMPORT|LOAD|INSTALL|PRAGMA)\b",
     re.IGNORECASE,
 )
+
+# Strips single-quoted and double-quoted string literals so that words like
+# INSERT/UPDATE appearing inside string values don't trigger the safety check.
+_STRIP_LITERALS = re.compile(r"'[^']*'|\"[^\"]*\"")
 
 
 def _validate_sql(sql: str) -> None:
@@ -47,7 +51,11 @@ def _validate_sql(sql: str) -> None:
         raise ValueError(
             f"Generated SQL must start with SELECT or WITH, got: {stripped[:80]!r}"
         )
-    if _WRITE_OPS.search(stripped):
+    # Remove string literals before scanning — prevents false positives on
+    # column aliases / function args that happen to contain reserved words
+    # (e.g. REPLACE('foo','a','b'), or a label like 'total_inserts').
+    sanitised = _STRIP_LITERALS.sub("''", stripped)
+    if _WRITE_OPS.search(sanitised):
         raise ValueError(f"Generated SQL contains a disallowed operation: {stripped[:200]!r}")
 
 
@@ -87,7 +95,8 @@ async def _call_llm(messages: list[dict]) -> str:
             },
         )
         resp.raise_for_status()
-        raw: str = resp.json()["choices"][0]["message"]["content"].strip()
+        content = resp.json()["choices"][0]["message"].get("content") or ""
+        raw: str = content.strip()
 
     # Strip markdown fences if model disobeys
     raw = re.sub(r"```sql\s*", "", raw, flags=re.IGNORECASE)
@@ -151,6 +160,23 @@ async def _generate_sql(query: str, schema: dict, filename: str) -> str:
         ) from exc
     except Exception as exc:
         raise RuntimeError(f"SQL generation call failed: {exc}") from exc
+
+    # LLM returned empty (can happen on very complex prompts hitting token limits).
+    # Retry once with a more concise prompt.
+    if not raw_sql:
+        log.warning("tabular_sql_empty_response_retrying", query=query[:100])
+        simple_user_msg = (
+            f"Table: `data`  Columns: {', '.join(c['name'] for c in cols)}\n"
+            f"Write a DuckDB SELECT to answer: {query}\n"
+            f"SQL only, no explanation."
+        )
+        try:
+            raw_sql = await _call_llm([
+                {"role": "system", "content": system_msg},
+                {"role": "user",   "content": simple_user_msg},
+            ])
+        except Exception as exc:
+            raise RuntimeError(f"SQL generation retry failed: {exc}") from exc
 
     if not raw_sql:
         raise ValueError("SQL provider returned an empty response")
