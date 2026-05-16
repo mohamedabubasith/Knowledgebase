@@ -199,7 +199,7 @@ CASES = [
 
     Case("C19", "Show revenue breakdown by region and channel (pivot-style: region rows, channel columns)",
          "Conditional aggregation / pivot",
-         lambda t: "Online" in t or "Retail" in t),
+         lambda t: "online" in t.lower() or "retail" in t.lower()),
 
     Case("C20", "What is the net revenue per quarter (revenue minus returns value, assuming return value = unit_price * returns)?",
          "Multi-column arithmetic",

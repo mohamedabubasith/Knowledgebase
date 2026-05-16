@@ -82,7 +82,7 @@ async def _call_llm(messages: list[dict]) -> str:
                 "model":       model,
                 "messages":    messages,
                 "temperature": 0.05,
-                "max_tokens":  512,
+                "max_tokens":  2048,
                 "stream":      False,
             },
         )
