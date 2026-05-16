@@ -1,10 +1,10 @@
 import hashlib
 import uuid
-from typing import Annotated
+from typing import Annotated, Optional
 
 import filetype
 import structlog
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from sqlalchemy import select
 
 from app.api.deps import AuthContext, require_editor
@@ -58,6 +58,7 @@ MAX_FILE_SIZE = 100 * 1024 * 1024
 async def upload_document(
     file: Annotated[UploadFile, File()],
     auth: Annotated[AuthContext, Depends(require_editor)],
+    parsing_strategy: Annotated[Optional[str], Form()] = "fast",
 ) -> IngestResponse:
     data = await file.read()
 
@@ -123,6 +124,7 @@ async def upload_document(
         "filename": filename, "mime_type": detected_mime,
         "file_size": len(data), "minio_path": minio_path,
     })
+    strategy = parsing_strategy if parsing_strategy in ("fast", "hi_res") else "fast"
     await enqueue(
         stage="ingest",
         document_id=document_id,
@@ -130,6 +132,7 @@ async def upload_document(
         payload={
             "document_id": document_id, "tenant_id": auth.tenant_id,
             "filename": filename, "mime_type": detected_mime, "minio_path": minio_path,
+            "parsing_strategy": strategy,
         },
     )
 

@@ -12,8 +12,9 @@ from app.models.domain import ParsedDocument
 log = structlog.get_logger(__name__)
 
 
-async def parse(filename: str, data: bytes, mime_type: str) -> ParsedDocument:
+async def parse(filename: str, data: bytes, mime_type: str, strategy: str = "fast") -> ParsedDocument:
     headers = {"unstructured-api-key": settings.unstructured_api_key} if settings.unstructured_api_key else {}
+    strategy = strategy if strategy in ("fast", "hi_res", "ocr_only", "auto") else "fast"
 
     async with httpx.AsyncClient(timeout=600.0) as client:
         r = await client.post(
@@ -21,7 +22,7 @@ async def parse(filename: str, data: bytes, mime_type: str) -> ParsedDocument:
             headers=headers,
             files={"files": (filename, data, mime_type)},
             data={
-                "strategy": "fast",
+                "strategy": strategy,
                 "include_page_breaks": "true",
             },
         )

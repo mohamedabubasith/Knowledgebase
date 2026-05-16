@@ -124,11 +124,12 @@ async def _process_tabular_job(
 
 
 async def _process_ingest_job(job_id: str, payload: dict) -> None:
-    document_id: str = payload["document_id"]
-    tenant_id: str   = payload["tenant_id"]
-    filename: str    = payload["filename"]
-    mime_type: str   = payload["mime_type"]
-    minio_path: str  = payload["minio_path"]
+    document_id: str      = payload["document_id"]
+    tenant_id: str        = payload["tenant_id"]
+    filename: str         = payload["filename"]
+    mime_type: str        = payload["mime_type"]
+    minio_path: str       = payload["minio_path"]
+    parsing_strategy: str = payload.get("parsing_strategy", "fast")
 
     # ── Tabular fast-path ────────────────────────────────────────────────────
     if _is_tabular_file(filename, mime_type):
@@ -142,7 +143,7 @@ async def _process_ingest_job(job_id: str, payload: dict) -> None:
         await _set_doc_status(document_id, "parsing")
 
         data   = await download_file(minio_path)
-        parsed = await parse_document(filename, data, mime_type)
+        parsed = await parse_document(filename, data, mime_type, parsing_strategy=parsing_strategy)
 
         if not parsed.raw_text.strip():
             await update_stage(document_id, tenant_id, "parse", "failed",

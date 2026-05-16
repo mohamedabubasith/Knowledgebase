@@ -54,6 +54,7 @@ async def parse_document(
     filename: str,
     data: bytes,
     mime_type: str,
+    parsing_strategy: str = "fast",
 ) -> ParsedDocument:
     """
     Route to correct parser based on registry.parse_backend + mime_type.
@@ -69,7 +70,7 @@ async def parse_document(
     if backend == "unstructured_api":
         from app.parsers.unstructured import parse as _parse
         try:
-            return await _parse(filename, data, mime_type)
+            return await _parse(filename, data, mime_type, strategy=parsing_strategy)
         except Exception as e:
             log.error("unstructured_api_parse_failed", error=str(e), filename=filename)
             raise
@@ -77,7 +78,7 @@ async def parse_document(
     if backend == "local_unstructured":
         from app.parsers.local_unstructured import parse as _parse
         try:
-            return await _parse(filename, data, mime_type)
+            return await _parse(filename, data, mime_type, strategy=parsing_strategy)
         except Exception as e:
             log.error("local_unstructured_parse_failed", error=str(e), filename=filename)
             raise
