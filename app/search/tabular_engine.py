@@ -68,6 +68,34 @@ def _sql_base_url() -> str:
     return settings.ollama_url.rstrip("/") + "/v1"
 
 
+async def _call_llm(messages: list[dict]) -> str:
+    """Low-level OpenAI-compat call. Returns raw content string."""
+    base_url = _sql_base_url()
+    api_key  = settings.tabular_sql_api_key or "ollama"
+    model    = settings.tabular_sql_model
+
+    async with httpx.AsyncClient(timeout=45.0) as client:
+        resp = await client.post(
+            f"{base_url}/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={
+                "model":       model,
+                "messages":    messages,
+                "temperature": 0.05,
+                "max_tokens":  512,
+                "stream":      False,
+            },
+        )
+        resp.raise_for_status()
+        raw: str = resp.json()["choices"][0]["message"]["content"].strip()
+
+    # Strip markdown fences if model disobeys
+    raw = re.sub(r"```sql\s*", "", raw, flags=re.IGNORECASE)
+    raw = re.sub(r"```\s*",    "", raw)
+    raw = raw.strip().rstrip(";").strip()
+    return raw
+
+
 async def _generate_sql(query: str, schema: dict, filename: str) -> str:
     """
     Call an OpenAI-compatible /chat/completions endpoint to translate `query`
@@ -111,51 +139,56 @@ async def _generate_sql(query: str, schema: dict, filename: str) -> str:
         f"SQL:"
     )
 
-    base_url = _sql_base_url()
-    api_key  = settings.tabular_sql_api_key or "ollama"
-    model    = settings.tabular_sql_model
-
     try:
-        async with httpx.AsyncClient(timeout=45.0) as client:
-            resp = await client.post(
-                f"{base_url}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model":    model,
-                    "messages": [
-                        {"role": "system", "content": system_msg},
-                        {"role": "user",   "content": user_msg},
-                    ],
-                    "temperature": 0.05,
-                    "max_tokens":  512,
-                    "stream":      False,
-                },
-            )
-            resp.raise_for_status()
-            data    = resp.json()
-            raw_sql = data["choices"][0]["message"]["content"].strip()
+        raw_sql = await _call_llm([
+            {"role": "system", "content": system_msg},
+            {"role": "user",   "content": user_msg},
+        ])
     except httpx.HTTPStatusError as exc:
         raise RuntimeError(
             f"SQL provider returned HTTP {exc.response.status_code} — check "
             f"TABULAR_SQL_BASE_URL / TABULAR_SQL_API_KEY / TABULAR_SQL_MODEL"
         ) from exc
-    except (KeyError, IndexError) as exc:
-        raise RuntimeError(f"Unexpected response structure from SQL provider: {exc}") from exc
     except Exception as exc:
         raise RuntimeError(f"SQL generation call failed: {exc}") from exc
-
-    # Strip markdown fences if model disobeys
-    raw_sql = re.sub(r"```sql\s*", "", raw_sql, flags=re.IGNORECASE)
-    raw_sql = re.sub(r"```\s*",    "", raw_sql)
-    raw_sql = raw_sql.strip().rstrip(";").strip()
 
     if not raw_sql:
         raise ValueError("SQL provider returned an empty response")
 
     return raw_sql
+
+
+async def _fix_sql(
+    original_sql: str,
+    error_msg: str,
+    schema: dict,
+    filename: str,
+) -> str:
+    """
+    Ask the LLM to correct a failing SQL given the DuckDB error message.
+    Returns corrected SQL string.
+    """
+    cols_block = "\n".join(
+        f"  {c['name']}  {c['type']}" for c in schema.get("columns", [])
+    )
+    fix_msg = (
+        f"The following DuckDB SQL query failed with an error.\n\n"
+        f"Table: `data`  |  File: {filename}\n"
+        f"Columns:\n{cols_block}\n\n"
+        f"Failing SQL:\n{original_sql}\n\n"
+        f"DuckDB error:\n{error_msg}\n\n"
+        f"Write a corrected SQL SELECT that fixes the error. "
+        f"Return ONLY the SQL — no explanation, no fences, no semicolons."
+    )
+    raw = await _call_llm([
+        {"role": "system", "content":
+            "You are a DuckDB SQL expert. Fix broken SQL queries. "
+            "Return ONLY the corrected SQL statement."},
+        {"role": "user", "content": fix_msg},
+    ])
+    if not raw:
+        raise ValueError("LLM returned empty fix")
+    return raw
 
 
 # ---------------------------------------------------------------------------
@@ -278,27 +311,65 @@ async def query_tabular(
             log.error("tabular_xlsx_convert_failed", document_id=document_id, error=str(exc))
             return sql, f"_Failed to convert XLSX to CSV: {exc}_"
 
-    # ── 5. Execute DuckDB in thread pool ───────────────────────────────────
+    # ── 5. Execute DuckDB with retry-on-error ─────────────────────────────
     with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as f:
         f.write(data)
         tmp_path = f.name
 
+    MAX_RETRIES = 2
+    last_exc: Exception | None = None
+
     try:
         loop = asyncio.get_event_loop()
-        headers, rows, total = await loop.run_in_executor(
-            None, _run_duckdb, tmp_path, sql, settings.tabular_max_result_rows
-        )
-    except Exception as exc:
-        log.error("tabular_duckdb_exec_failed", document_id=document_id, sql=sql, error=str(exc))
-        return sql, (
-            f"_SQL execution failed: {exc}_\n\n"
-            f"**Generated SQL:**\n```sql\n{sql}\n```"
-        )
+        for attempt in range(MAX_RETRIES + 1):
+            try:
+                headers, rows, total = await loop.run_in_executor(
+                    None, _run_duckdb, tmp_path, sql, settings.tabular_max_result_rows
+                )
+                if attempt > 0:
+                    log.info(
+                        "tabular_sql_fixed",
+                        document_id=document_id,
+                        attempt=attempt,
+                        sql=sql[:200],
+                    )
+                last_exc = None
+                break  # success
+            except Exception as exc:
+                last_exc = exc
+                if attempt < MAX_RETRIES:
+                    log.warning(
+                        "tabular_duckdb_error_retrying",
+                        document_id=document_id,
+                        attempt=attempt + 1,
+                        error=str(exc),
+                        sql=sql[:200],
+                    )
+                    try:
+                        fixed = await _fix_sql(sql, str(exc), table_schema, filename)
+                        _validate_sql(fixed)
+                        sql = fixed
+                    except Exception as fix_exc:
+                        log.warning("tabular_fix_failed", error=str(fix_exc))
+                        break  # give up if fix itself fails
+                else:
+                    log.error(
+                        "tabular_duckdb_exec_failed",
+                        document_id=document_id,
+                        sql=sql,
+                        error=str(exc),
+                    )
     finally:
         try:
             os.unlink(tmp_path)
         except OSError:
             pass
+
+    if last_exc is not None:
+        return sql, (
+            f"_SQL execution failed after {MAX_RETRIES} retries: {last_exc}_\n\n"
+            f"**Last SQL attempted:**\n```sql\n{sql}\n```"
+        )
 
     # ── 6. Format result ───────────────────────────────────────────────────
     md = _format_markdown(headers, rows, total)
