@@ -203,7 +203,12 @@ def upload(client: httpx.Client, base: str, api_key: str, filename: str, data: b
         files={"file": (filename, data, mime)},
         headers=headers(api_key),
     )
-    if r.status_code not in (200, 201):
+    if r.status_code == 409:
+        # Duplicate — server returns existing document_id
+        doc_id = r.json().get("document_id") or r.json().get("detail", "").split(": ")[-1]
+        warn(f"{filename} already exists → reusing document_id={doc_id}")
+        return doc_id
+    if r.status_code not in (200, 201, 202):
         fail(f"Upload {filename} failed: {r.status_code} {r.text[:300]}")
     doc_id = r.json()["document_id"]
     ok(f"Uploaded {filename} → document_id={doc_id}")
