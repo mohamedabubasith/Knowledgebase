@@ -6,11 +6,12 @@ Uses PostgreSQL-backed job queue with retry + exponential backoff.
 Tabular branch (CSV / XLSX / TSV)
 ----------------------------------
 Tabular files skip the normal parse → chunk pipeline.  Instead:
-  1. Profile schema with DuckDB (column names, types, sample values, row count)
-  2. Persist a single "summary" Chunk that describes the table — this is what
+  1. Profile schema in pure Python (column names, types, sample values, row count)
+  2. Upload CSV to MindsDB for SQL query execution at search time
+  3. Persist a single "summary" Chunk that describes the table — this is what
      gets embedded and indexed for hybrid search
-  3. Mark Document.is_tabular = True and store table_schema as JSONB
-  4. Enqueue embed as usual (summary chunk will be embedded)
+  4. Mark Document.is_tabular = True and store table_schema as JSONB
+  5. Enqueue embed as usual (summary chunk will be embedded)
 """
 import asyncio
 import structlog
@@ -28,6 +29,7 @@ from app.ingestion.tabular_profiler import (
 )
 from app.parsers.router import parse_document
 from app.storage.minio_client import download_file
+from app.storage import mindsdb_client as mdb
 from app.workers.db_queue import ack, enqueue, nack, wait_for_job
 
 log = structlog.get_logger(__name__)
@@ -57,8 +59,15 @@ async def _process_tabular_job(
 
         data = await download_file(minio_path)
 
-        # Profile schema
-        schema = await profile_tabular(filename, data, mime_type)
+        # Profile schema (returns schema + csv_bytes ready for MindsDB)
+        schema, csv_bytes = await profile_tabular(filename, data, mime_type)
+
+        # Upload to MindsDB for SQL query execution
+        mdb_name = mdb.mindsdb_name(document_id)
+        loop = asyncio.get_event_loop()
+        ok = await loop.run_in_executor(None, mdb.upload_file, mdb_name, csv_bytes)
+        if not ok:
+            log.warning("mindsdb_upload_failed_continuing", document_id=document_id)
 
         await update_stage(document_id, tenant_id, "parse", "done", {
             "parse_mode":  "tabular",

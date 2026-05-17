@@ -10,6 +10,7 @@ from sqlalchemy import delete, update
 from app.db.models import AuditLog, Document
 from app.db.session import get_session_factory
 from app.storage.minio_client import delete_file
+from app.storage import mindsdb_client as mdb
 from app.vectorstore import get_vector_store
 from app.workers.db_queue import ack, nack, wait_for_job
 
@@ -29,7 +30,16 @@ async def _process_purge_job(job_id: str, payload: dict) -> None:
         except Exception as e:
             log.warning("purge_vector_fail", document_id=document_id, error=str(e))
 
-        # 2. MinIO
+        # 2. MindsDB file (tabular docs only — safe to call for all, returns True if 404)
+        try:
+            import asyncio as _asyncio
+            mdb_name = mdb.mindsdb_name(document_id)
+            loop = _asyncio.get_event_loop()
+            await loop.run_in_executor(None, mdb.delete_file, mdb_name)
+        except Exception as e:
+            log.warning("purge_mindsdb_fail", document_id=document_id, error=str(e))
+
+        # 3. MinIO
         try:
             await delete_file(minio_path)
         except Exception as e:

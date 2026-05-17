@@ -59,6 +59,9 @@ class Settings(BaseSettings):
     search_cache_ttl: int = 300
     search_cache_max: int = 1000
 
+    # MindsDB — tabular SQL execution layer
+    mindsdb_url: str = "http://mindsdb:47334"
+
     # Tabular NL2SQL — OpenAI-compatible endpoint
     # Any OpenAI-compatible provider works: OpenAI, Groq, together.ai, vLLM, LiteLLM,
     # or local Ollama (set TABULAR_SQL_BASE_URL=http://ollama:11434/v1 with key "ollama").
@@ -66,7 +69,6 @@ class Settings(BaseSettings):
     tabular_sql_base_url: str = ""          # e.g. https://api.openai.com/v1
     tabular_sql_api_key: str = "ollama"     # API key ("ollama" for local Ollama, real key for cloud)
     tabular_sql_model: str = "qwen2.5:7b"  # Model name visible to the chosen provider
-    # Max rows DuckDB will return for a single tabular query
     tabular_max_result_rows: int = 100
 
     # JWT

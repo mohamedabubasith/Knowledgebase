@@ -1,10 +1,9 @@
 """
 Tabular document profiler.
 
-Downloads CSV / XLSX from MinIO, profiles schema with DuckDB (runs in a thread
-pool so DuckDB's GIL-bound operations don't block the event loop), generates a
-plain-text summary chunk for vector + FTS indexing, and stores structured schema
-metadata in documents.table_schema.
+Profiles CSV / XLSX schema using pure Python (no DuckDB).
+Schema info (columns, types, samples, row count) is extracted locally,
+then the file is uploaded to MindsDB for SQL query execution at search time.
 
 Supported input types
 ---------------------
@@ -17,10 +16,9 @@ import asyncio
 import csv
 import io
 import os
-import tempfile
+import re
 from typing import Optional
 
-import duckdb
 import structlog
 
 log = structlog.get_logger(__name__)
@@ -53,7 +51,7 @@ def is_tabular(filename: str, mime_type: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# XLSX → CSV conversion (pure Python, no pandas)
+# XLSX → CSV conversion (pure Python, openpyxl)
 # ---------------------------------------------------------------------------
 
 def _xlsx_to_csv_bytes(data: bytes, sheet_name: Optional[str] = None) -> tuple[bytes, str]:
@@ -77,19 +75,38 @@ def _xlsx_to_csv_bytes(data: bytes, sheet_name: Optional[str] = None) -> tuple[b
 
 
 # ---------------------------------------------------------------------------
-# DuckDB profiling (blocking — run in executor)
+# Type inference
 # ---------------------------------------------------------------------------
 
-def _profile_sync(filename: str, data: bytes, mime_type: str) -> dict:
-    """
-    Profile a tabular file using DuckDB.
+_INT_PAT   = re.compile(r"^-?\d+$")
+_FLOAT_PAT = re.compile(r"^-?\d*\.?\d+([eE][+-]?\d+)?$")
 
-    Returns:
+
+def _infer_type(samples: list[str]) -> str:
+    non_empty = [s for s in samples if s.strip()]
+    if not non_empty:
+        return "VARCHAR"
+    if all(_INT_PAT.match(s.strip()) for s in non_empty):
+        return "BIGINT"
+    if all(_FLOAT_PAT.match(s.strip()) for s in non_empty):
+        return "DOUBLE"
+    return "VARCHAR"
+
+
+# ---------------------------------------------------------------------------
+# Pure-Python CSV profiling
+# ---------------------------------------------------------------------------
+
+def _profile_sync(filename: str, data: bytes, mime_type: str) -> tuple[dict, bytes]:
+    """
+    Profile a tabular file using pure Python.
+
+    Returns (schema_dict, csv_bytes) where csv_bytes is ready for MindsDB upload.
+    XLSX files are converted to CSV bytes first.
+
+    Schema dict:
         {
-            "columns": [
-                {"name": str, "type": str, "sample": [str, ...]},
-                ...
-            ],
+            "columns": [{"name": str, "type": str, "sample": [str, ...]}, ...],
             "row_count": int,
             "sheet_name": str | None,
         }
@@ -98,77 +115,54 @@ def _profile_sync(filename: str, data: bytes, mime_type: str) -> dict:
     ext  = os.path.splitext(filename.lower())[1]
 
     sheet_name: Optional[str] = None
-    csv_data = data
+    csv_bytes = data
 
-    # Convert XLSX → CSV in-memory
     if mime in _XLSX_MIMES or ext in (".xlsx", ".xls"):
-        csv_data, sheet_name = _xlsx_to_csv_bytes(data)
+        csv_bytes, sheet_name = _xlsx_to_csv_bytes(data)
 
-    # Write CSV to a temp file (DuckDB read_csv_auto needs a path)
-    with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as f:
-        f.write(csv_data)
-        tmp_path = f.name
+    csv_text = csv_bytes.decode("utf-8", errors="replace")
+    reader   = csv.reader(io.StringIO(csv_text))
 
     try:
-        conn = duckdb.connect(":memory:")
+        headers = next(reader)
+    except StopIteration:
+        return {"columns": [], "row_count": 0, "sheet_name": sheet_name}, csv_bytes
 
-        # ── Schema ───────────────────────────────────────────────────────────
-        desc_rows = conn.execute(
-            f"DESCRIBE SELECT * FROM read_csv_auto('{tmp_path}', header=true, sample_size=2000)"
-        ).fetchall()
-        # desc_rows columns: column_name, column_type, null, key, default, extra
+    sample_rows: list[list[str]] = []
+    row_count = 0
+    for row in reader:
+        row_count += 1
+        if row_count <= 5:
+            sample_rows.append(row)
 
-        col_names = [r[0] for r in desc_rows]
+    columns = []
+    for i, h in enumerate(headers):
+        samples = [
+            str(row[i]) for row in sample_rows
+            if i < len(row) and row[i] is not None and str(row[i]).strip()
+        ][:5]
+        columns.append({"name": h, "type": _infer_type(samples), "sample": samples})
 
-        # ── Sample values (first 5 rows) ─────────────────────────────────────
-        sample_rows = conn.execute(
-            f"SELECT * FROM read_csv_auto('{tmp_path}', header=true) LIMIT 5"
-        ).fetchall()
-
-        # ── Row count ────────────────────────────────────────────────────────
-        row_count: int = conn.execute(
-            f"SELECT COUNT(*) FROM read_csv_auto('{tmp_path}', header=true)"
-        ).fetchone()[0]  # type: ignore[index]
-
-        conn.close()
-
-        columns = []
-        for i, row in enumerate(desc_rows):
-            samples = [
-                str(sr[i])
-                for sr in sample_rows
-                if i < len(sr) and sr[i] is not None and str(sr[i]).strip()
-            ][:5]
-            columns.append({
-                "name":   row[0],
-                "type":   row[1],
-                "sample": samples,
-            })
-
-        return {
-            "columns":    columns,
-            "row_count":  row_count,
-            "sheet_name": sheet_name,
-        }
-
-    finally:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
+    return {
+        "columns":    columns,
+        "row_count":  row_count,
+        "sheet_name": sheet_name,
+    }, csv_bytes
 
 
 # ---------------------------------------------------------------------------
 # Async wrapper
 # ---------------------------------------------------------------------------
 
-async def profile_tabular(filename: str, data: bytes, mime_type: str) -> dict:
+async def profile_tabular(filename: str, data: bytes, mime_type: str) -> tuple[dict, bytes]:
     """
-    Async wrapper around `_profile_sync`.  Runs DuckDB in the default thread
-    executor so the event loop stays responsive.
+    Async wrapper around `_profile_sync`.
+
+    Returns (schema_dict, csv_bytes).
+    csv_bytes is suitable for direct upload to MindsDB.
     """
     loop = asyncio.get_event_loop()
-    schema = await loop.run_in_executor(None, _profile_sync, filename, data, mime_type)
+    schema, csv_bytes = await loop.run_in_executor(None, _profile_sync, filename, data, mime_type)
     log.info(
         "tabular_profiled",
         filename=filename,
@@ -176,7 +170,7 @@ async def profile_tabular(filename: str, data: bytes, mime_type: str) -> dict:
         row_count=schema["row_count"],
         sheet=schema.get("sheet_name"),
     )
-    return schema
+    return schema, csv_bytes
 
 
 # ---------------------------------------------------------------------------
@@ -186,10 +180,6 @@ async def profile_tabular(filename: str, data: bytes, mime_type: str) -> dict:
 def build_summary_chunk(filename: str, schema: dict) -> str:
     """
     Build a human-readable summary of the tabular file for embedding + FTS.
-
-    This text becomes the single Chunk stored in Postgres / Qdrant so that
-    normal hybrid search can surface the document, after which the search
-    engine enriches the result with an actual DuckDB NL2SQL answer.
     """
     cols      = schema.get("columns", [])
     row_count = schema.get("row_count", 0)
@@ -199,7 +189,6 @@ def build_summary_chunk(filename: str, schema: dict) -> str:
         f"{c['name']} ({c['type']})" for c in cols[:30]
     )
 
-    # Show sample values for the first few columns to improve semantic matching
     sample_lines = []
     for c in cols[:5]:
         if c.get("sample"):
