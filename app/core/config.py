@@ -1,79 +1,39 @@
+from functools import lru_cache
+from pathlib import Path
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import Field
-
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    app_name: str = "Local Knowledge Base"
+    environment: str = "production"
+    database_url: str
+    secret_key: str
+    super_admin_email: str = "admin@example.com"
+    super_admin_password: str = "Admin@123"
+    redis_url: str = "redis://redis:6379/0"
+    ollama_url: str = "http://ollama:11434"
+    embed_model: str = "nomic-embed-text"
+    llm_model: str = "llama3.2:3b"
+    upload_dir: Path = Path("/app/uploads")
+    max_upload_size_mb: int = 100
+    chunk_size: int = 512
+    chunk_overlap: int = 64
+    cors_origins: list[str] = ["*"]
+    access_token_minutes: int = 30
+    refresh_token_days: int = 7
+    model_config = SettingsConfigDict(env_file=".env", case_sensitive=False, extra="ignore")
 
-    # App
-    app_env: str = "production"
-    app_secret_key: str = "change-me-insecure-default"
-    log_level: str = "INFO"
+    @field_validator("database_url")
+    @classmethod
+    def async_database_url(cls, value: str) -> str:
+        return value.replace("postgresql://", "postgresql+asyncpg://", 1)
 
-    # Postgres
-    postgres_dsn: str = "postgresql://cortex:cortex@localhost:5432/cortex_kb"
-    postgres_pool_min: int = 5
-    postgres_pool_max: int = 20
+    @field_validator("secret_key")
+    @classmethod
+    def secure_secret(cls, value: str) -> str:
+        if len(value) < 32: raise ValueError("SECRET_KEY must contain at least 32 characters")
+        return value
 
-    # MinIO
-    minio_endpoint: str = "localhost:9000"
-    minio_access_key: str = "minioadmin"
-    minio_secret_key: str = "minioadmin"
-    minio_bucket_raw: str = "raw-documents"
-    minio_secure: bool = False
-
-    # Qdrant
-    qdrant_url: str = ""
-    qdrant_api_key: str = ""
-    qdrant_collection: str = "cortex_kb"
-
-    # ChromaDB fallback
-    chroma_persist_dir: str = "./data/chroma"
-
-    # Unstructured
-    unstructured_api_url: str = ""
-    unstructured_api_key: str = ""
-    unstructured_local_url: str = "http://localhost:8000"
-
-    # Embeddings
-    ollama_url: str = "http://localhost:11434"
-    ollama_embed_model: str = "nomic-embed-text"
-    st_model: str = "paraphrase-multilingual-mpnet-base-v2"  # 768-dim — matches Ollama paraphrase-multilingual
-    # Max tokens the embedding model accepts (model's native tokenizer tokens).
-    # paraphrase-multilingual:latest (GGUF bert) = 512 context_length → use 500 (leaves room for [CLS]/[SEP])
-    # nomic-embed-text                           = 8192
-    # mxbai-embed-large                          = 512
-    # Set in .env as EMBEDDING_MAX_TOKENS to match whichever model you use.
-    embedding_max_tokens: int = 500  # default: paraphrase-multilingual (512 context − 12 special tokens)
-
-    # Workers
-    worker_concurrency: int = 4
-    parse_process_workers: int = 2
-    embed_batch_size: int = 64
-    ingest_queue_size: int = 500
-
-    # Search
-    search_top_k: int = 10
-    hybrid_vector_weight: float = 0.6
-    hybrid_lexical_weight: float = 0.4
-    search_cache_ttl: int = 300
-    search_cache_max: int = 1000
-
-    # MindsDB — tabular SQL execution layer
-    mindsdb_url: str = "http://mindsdb:47334"
-
-    # Tabular NL2SQL — OpenAI-compatible endpoint
-    # Any OpenAI-compatible provider works: OpenAI, Groq, together.ai, vLLM, LiteLLM,
-    # or local Ollama (set TABULAR_SQL_BASE_URL=http://ollama:11434/v1 with key "ollama").
-    # Leave TABULAR_SQL_BASE_URL empty to default to the configured OLLAMA_URL + /v1.
-    tabular_sql_base_url: str = ""          # e.g. https://api.openai.com/v1
-    tabular_sql_api_key: str = "ollama"     # API key ("ollama" for local Ollama, real key for cloud)
-    tabular_sql_model: str = "qwen2.5:7b"  # Model name visible to the chosen provider
-    tabular_max_result_rows: int = 100
-
-    # JWT
-    jwt_algorithm: str = "HS256"
-    jwt_expire_minutes: int = 60
-
-
-settings = Settings()
+@lru_cache
+def get_settings() -> Settings: return Settings()
+settings = get_settings()

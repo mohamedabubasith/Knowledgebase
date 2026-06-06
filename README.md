@@ -1,102 +1,49 @@
-# Cortex KB
+# Atlas KB — Local Production Knowledge Base
 
-Production-grade self-hosted knowledge base with hybrid search.
+Atlas KB is a private, multilingual retrieval-augmented generation platform. Documents are parsed by Unstructured, embedded with `nomic-embed-text`, stored in an external PostgreSQL/pgvector database, and answered by `llama3.2:3b`. All AI inference stays inside Ollama.
 
-## Stack
+## Architecture
 
-| Layer | Technology |
-|-------|-----------|
-| API | FastAPI + SQLAlchemy 2.0 async |
-| Database | PostgreSQL (auto-migrated on startup) |
-| Object Storage | MinIO |
-| Vector Store | Qdrant (ChromaDB fallback) |
-| Embeddings | Ollama (SentenceTransformers fallback) |
-| Parsing | Unstructured API → local parsers (PyMuPDF, python-docx, BS4) |
-| Search | Hybrid (vector + FTS), vector-only, lexical-only |
+- **API:** FastAPI, async SQLAlchemy/asyncpg, JWT RBAC, pgvector
+- **Pipeline:** Redis + ARQ worker, Unstructured, persistent upload volume
+- **AI:** Ollama embedding and generation models; no external AI APIs
+- **Admin:** Next.js 14 dashboard with users, KBs, documents, queue health, and prompt audit logs
+- **Edge:** Nginx routes `/api` to FastAPI and all other traffic to Next.js
 
-## Quick Start
+PostgreSQL is intentionally **not** included in Compose. Supply an external PostgreSQL server whose database user can execute `CREATE EXTENSION vector`.
+
+## Quick start
 
 ```bash
-# 1. Copy env
-cp .env.coolify .env   # edit values
-
-# 2. Run
-docker compose up -d
-
-# 3. Bootstrap (first run only — creates admin key)
-curl -X POST http://localhost:8080/bootstrap
-
-# 4. Save the returned api_key — shown once
+cp .env.example .env
+# Edit DATABASE_URL, SECRET_KEY, and super-admin credentials
+docker compose up --build
 ```
 
-## API
+Open `http://localhost`, sign in with the configured super-admin account, and create a knowledge base. API docs are available at `http://localhost/docs`.
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/bootstrap` | POST | First-run setup — creates admin key |
-| `/health` | GET | System health + active backends |
-| `/ingest/upload` | POST | Upload document (PDF, DOCX, TXT, MD, HTML) |
-| `/status/{doc_id}` | GET | Pipeline status for a document |
-| `/status/{doc_id}/stream` | GET | SSE stream of pipeline events |
-| `/search` | POST | Hybrid / vector / lexical search |
-| `/documents` | GET | List documents |
-| `/documents/{doc_id}` | GET | Document detail |
-| `/documents/{doc_id}/chunks` | GET | Document chunks |
-| `/documents/{doc_id}` | DELETE | Delete document |
-| `/admin/api-keys` | POST | Create API key |
-| `/admin/api-keys` | GET | List API keys |
-| `/admin/api-keys/{id}` | DELETE | Revoke API key |
+On first startup, Compose waits for Ollama and pulls both required models. FastAPI enables pgvector, creates tables, creates the upload directory, and idempotently seeds the super administrator.
 
-Full interactive docs at `/docs`.
-
-## Auth
-
-All endpoints require `X-Api-Key` header. Roles: `admin`, `editor`, `viewer`.
+## Operations
 
 ```bash
-curl -H "X-Api-Key: cortex_xxx" http://localhost:8080/documents
+docker compose logs -f api worker
+docker compose ps
+docker compose down                 # retained volumes
+docker compose down -v              # deletes uploads, Redis data, and Ollama models
 ```
 
-## Pipeline
+Uploads are always queued; the API never parses documents synchronously. Query successes and failures are written to `prompt_logs`. Keep `.env` private and use a randomly generated 32+ character `SECRET_KEY` in production.
 
-Upload triggers a 5-stage async pipeline:
+## API overview
 
-```
-upload → parse → chunk → embed → index
-```
+All application endpoints live under `/api/v1`. Authenticate through `/api/v1/auth/login`, then send `Authorization: Bearer <access_token>`. Important groups include `/users`, `/knowledge-bases`, nested document routes, `/query`, and `/admin`.
 
-Poll status via `GET /status/{doc_id}` or stream events via SSE.
-
-## Search
+## Development checks
 
 ```bash
-curl -X POST http://localhost:8080/search \
-  -H "X-Api-Key: cortex_xxx" \
-  -H "Content-Type: application/json" \
-  -d '{"query": "your question", "mode": "hybrid", "top_k": 10}'
-```
+python -m compileall app
+cd frontend && npm install && npm run build
 
-Modes: `hybrid` (default), `vector_only`, `lexical_only`.
-
-## Deploy (Coolify)
-
-1. Push repo to GitHub
-2. Coolify → New Resource → Docker Compose
-3. Add env vars from `.env.coolify`
-4. Deploy
-
-## Development
-
-```bash
-# Install deps
-uv sync
-
-# Run locally
-uv run uvicorn app.main:app --reload --port 8080
-
-# E2E test (server must be running)
-uv run python scripts/e2e_test.py
-
-# Unit tests
-uv run pytest tests/ -v
+docker compose config
 ```

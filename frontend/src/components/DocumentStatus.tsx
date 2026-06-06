@@ -1,0 +1,1 @@
+export default function DocumentStatus({status}:{status:string}){const colors:{[k:string]:string}={completed:'#55d6a0',failed:'#ff6577',processing:'#67a8ff',pending:'#f7c75f'};return <span className="badge" style={{color:colors[status]||'#aaa'}}>{status}</span>}

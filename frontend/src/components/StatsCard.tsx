@@ -1,0 +1,1 @@
+export default function StatsCard({label,value,accent='#8d70ff'}:{label:string,value:number|string,accent?:string}){return <div className="card" style={{padding:20}}><div className="muted" style={{fontSize:13}}>{label}</div><div style={{fontSize:34,fontWeight:900,color:accent,marginTop:8}}>{value}</div></div>}
