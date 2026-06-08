@@ -53,12 +53,12 @@ def _validate_sql(sql: str) -> None:
 def _sql_base_url() -> str:
     if settings.tabular_sql_base_url.strip():
         return settings.tabular_sql_base_url.rstrip("/")
-    return settings.ollama_url.rstrip("/") + "/v1"
+    raise RuntimeError("TABULAR_SQL_BASE_URL must be configured")
 
 
 async def _call_llm(messages: list[dict]) -> str:
     base_url = _sql_base_url()
-    api_key  = settings.tabular_sql_api_key or "ollama"
+    api_key  = settings.tabular_sql_api_key or "local"
     model    = settings.tabular_sql_model
 
     async with httpx.AsyncClient(timeout=45.0) as client:

@@ -1,0 +1,162 @@
+/* Workspace / user-facing UI — Basivo-inspired dark theme */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap');
+
+:root {
+  --bg-base:    #05070A;
+  --bg-surface: #0A0C12;
+  --bg-raised:  #1A1F2E;
+  --bg-hover:   #232627;
+  --border:     rgba(255,255,255,0.06);
+  --border-g:   rgba(118,185,0,0.2);
+  --text:       #FFFFFF;
+  --text-sub:   #e5e7eb;
+  --text-muted: #9ca3af;
+  --text-dim:   #6b7280;
+  --accent:     #76B900;
+  --accent-dim: rgba(118,185,0,0.15);
+  --accent-low: rgba(118,185,0,0.06);
+  --red:        #ef4444;
+  --red-dim:    rgba(239,68,68,0.15);
+  --amber:      #f59e0b;
+  --font:       'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+
+.ws-body {
+  font-family: var(--font);
+  background: var(--bg-base);
+  color: var(--text);
+  min-height: 100vh;
+}
+
+/* ── Input ── */
+.ws-input {
+  width: 100%;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-size: 14px;
+  color: var(--text);
+  font-family: var(--font);
+  outline: none;
+  transition: border-color .15s;
+  box-sizing: border-box;
+}
+.ws-input:focus  { border-color: var(--border-g); box-shadow: 0 0 0 3px var(--accent-low); }
+.ws-input::placeholder { color: var(--text-dim); }
+
+/* ── Buttons ── */
+.ws-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 10px 20px;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  font-family: var(--font);
+  cursor: pointer;
+  border: none;
+  transition: all .15s;
+  white-space: nowrap;
+}
+.ws-btn-primary  { background: var(--accent); color: #000; }
+.ws-btn-primary:hover  { background: #8fd400; }
+.ws-btn-ghost    { background: transparent; color: var(--text-muted); border: 1px solid var(--border); }
+.ws-btn-ghost:hover    { background: rgba(255,255,255,0.05); color: var(--text); }
+.ws-btn-danger   { background: var(--red-dim); color: var(--red); border: 1px solid rgba(239,68,68,0.25); }
+.ws-btn-danger:hover   { background: rgba(239,68,68,0.25); }
+.ws-btn-sm       { padding: 6px 14px; font-size: 12px; border-radius: 6px; }
+
+/* ── Card ── */
+.ws-card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 24px;
+}
+
+/* ── Label ── */
+.ws-label {
+  display: block;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-sub);
+  margin-bottom: 6px;
+}
+
+/* ── Badge ── */
+.ws-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 10px;
+  border-radius: 20px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .04em;
+}
+.ws-badge-green  { background: var(--accent-low); color: var(--accent); border: 1px solid var(--border-g); }
+.ws-badge-red    { background: var(--red-dim); color: var(--red); border: 1px solid rgba(239,68,68,0.25); }
+.ws-badge-amber  { background: rgba(245,158,11,0.1); color: var(--amber); border: 1px solid rgba(245,158,11,0.25); }
+.ws-badge-gray   { background: rgba(255,255,255,0.05); color: var(--text-muted); border: 1px solid var(--border); }
+
+/* ── Table ── */
+.ws-table { width: 100%; border-collapse: collapse; }
+.ws-table th {
+  padding: 10px 16px; text-align: left; font-size: 11px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: .08em; color: var(--text-dim);
+  border-bottom: 1px solid var(--border); background: rgba(255,255,255,0.02);
+}
+.ws-table td {
+  padding: 12px 16px; font-size: 13px;
+  border-bottom: 1px solid rgba(255,255,255,0.03);
+  color: var(--text-sub);
+}
+.ws-table tr:hover td { background: rgba(255,255,255,0.02); }
+
+/* ── Sidebar nav link ── */
+.ws-nav-link {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 12px; border-radius: 8px;
+  font-size: 13px; font-weight: 500; color: var(--text-dim);
+  text-decoration: none; cursor: pointer; transition: all .15s;
+  border: none; background: none; width: 100%; font-family: var(--font);
+}
+.ws-nav-link:hover { background: var(--bg-raised); color: var(--text-sub); }
+.ws-nav-link.active { background: var(--accent-low); color: var(--accent); }
+
+/* ── Grid glow bg ── */
+.ws-grid-bg {
+  background-image: linear-gradient(rgba(255,255,255,0.03) 1px, transparent 1px),
+                    linear-gradient(90deg, rgba(255,255,255,0.03) 1px, transparent 1px);
+  background-size: 32px 32px;
+}
+
+/* ── Glow radial ── */
+.ws-glow-center {
+  background: radial-gradient(circle, rgba(118,185,0,0.15) 0%, transparent 50%);
+}
+
+/* ── Auth page ── */
+.ws-auth-page {
+  min-height: 100vh;
+  background: var(--bg-base);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  position: relative;
+  overflow: hidden;
+}
+.ws-auth-glow-1 {
+  position: absolute; top: 0; right: 0; width: 600px; height: 600px;
+  background: radial-gradient(circle at 100% 0, rgba(118,185,0,0.08) 0%, transparent 50%);
+  pointer-events: none;
+}
+.ws-auth-glow-2 {
+  position: absolute; bottom: 0; left: 0; width: 400px; height: 400px;
+  background: radial-gradient(circle at 0 100%, rgba(118,185,0,0.05) 0%, transparent 50%);
+  pointer-events: none;
+}

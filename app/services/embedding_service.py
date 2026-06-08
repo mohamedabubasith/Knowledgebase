@@ -1,6 +1,6 @@
 import asyncio
-from app.core.ollama import ollama
-async def embed_text(text:str)->list[float]: return await ollama.embed(text)
+from app.core.embedding import get_embedding
+async def embed_text(text:str)->list[float]: return await asyncio.to_thread(get_embedding,text)
 async def embed_many(texts:list[str],concurrency:int=4)->list[list[float]]:
     semaphore=asyncio.Semaphore(concurrency)
     async def one(text):

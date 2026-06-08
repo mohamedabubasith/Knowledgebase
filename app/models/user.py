@@ -11,4 +11,4 @@ class User(UUIDTimestampMixin,Base):
     full_name: Mapped[str]=mapped_column(String(255),default="")
     role: Mapped[UserRole]=mapped_column(Enum(UserRole),default=UserRole.user)
     is_active: Mapped[bool]=mapped_column(Boolean,default=True)
-    knowledge_bases=relationship("KnowledgeBase",back_populates="owner")
+    knowledge_bases=relationship("KnowledgeBase",back_populates="owner",passive_deletes=True)
