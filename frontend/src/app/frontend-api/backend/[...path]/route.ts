@@ -1,0 +1,3 @@
+import {cookies} from 'next/headers';
+async function proxy(request:Request,{params}:{params:{path:string[]}}){const token=cookies().get('kb_access')?.value;const url=new URL(request.url);const target=`${process.env.BACKEND_URL}/${params.path.join('/')}${url.search}`;const headers=new Headers(request.headers);headers.set('Authorization',`Bearer ${token||''}`);headers.delete('host');const body=['GET','HEAD'].includes(request.method)?undefined:await request.arrayBuffer();const result=await fetch(target,{method:request.method,headers,body,cache:'no-store'});return new Response(result.body,{status:result.status,headers:{'Content-Type':result.headers.get('Content-Type')||'application/json'}})}
+export {proxy as GET,proxy as POST,proxy as PUT,proxy as PATCH,proxy as DELETE};

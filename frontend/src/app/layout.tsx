@@ -1,0 +1,1 @@
+import './globals.css';export const metadata={title:'Atlas KB Admin',description:'Local AI knowledge platform'};export default function RootLayout({children}:{children:React.ReactNode}){return <html lang="en"><body>{children}</body></html>}
